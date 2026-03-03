@@ -23,16 +23,35 @@ meeting_app = typer.Typer(help="List and inspect Webex meetings.")
 DEFAULT_LAST_LOOKBACK_DAYS = 30
 
 
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _meeting_duration(item: dict[str, Any]) -> str:
+    started = _parse_dt(item.get("start") or item.get("startedAt") or item.get("started_at"))
+    ended = _parse_dt(item.get("end") or item.get("endedAt") or item.get("ended_at"))
+    if not started or not ended:
+        return ""
+    minutes = int((ended - started).total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
 def _normalize_meeting(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "meeting_id": item.get("id") or item.get("meetingId"),
-        "series_id": item.get("meetingSeriesId"),
         "title": item.get("title") or item.get("topic") or "",
         "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
-        "ended_at": item.get("end") or item.get("endedAt") or item.get("ended_at"),
+        "duration": _meeting_duration(item),
         "host_email": item.get("hostEmail") or item.get("host_email"),
         "host_name": item.get("hostDisplayName"),
-        "site_url": item.get("siteUrl"),
     }
 
 
@@ -113,18 +132,11 @@ def get_meeting(
             item = client.get_meeting(meeting_id)
         data = {
             "meeting_id": item.get("id") or meeting_id,
+            "title": item.get("title") or item.get("topic") or "",
+            "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
             "join_url": item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl"),
-            "transcript_hint": (
-                "ready"
-                if item.get("hasTranscript") is True
-                else "unknown"
-            ),
-            "recording_hint": (
-                "ready"
-                if item.get("hasRecording") is True
-                else "unknown"
-            ),
-            "raw": item,
+            "transcript": "ready" if item.get("hasTranscript") is True else "unknown",
+            "recording": "ready" if item.get("hasRecording") is True else "unknown",
         }
         emit_success(command, data, as_json=json_output)
     except CliError as exc:

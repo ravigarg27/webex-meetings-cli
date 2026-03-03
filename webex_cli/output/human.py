@@ -83,7 +83,7 @@ def emit_success_human(data: Any) -> None:
     if isinstance(data, dict):
         items = data.get("items")
         if isinstance(items, list) and _emit_table(items):
-            extra = {k: v for k, v in data.items() if k != "items"}
+            extra = {k: v for k, v in data.items() if k != "items" and v is not None and v != ""}
             for key, value in extra.items():
                 typer.echo(f"{key}: {_to_cell(value)}")
             return
@@ -98,14 +98,25 @@ def emit_success_human(data: Any) -> None:
             typer.echo(f"Total:       {total}")
             results = data.get("results")
             if isinstance(results, list):
-                _emit_table([r for r in results if isinstance(r, dict)])
+                display = []
+                for r in results:
+                    if not isinstance(r, dict):
+                        continue
+                    row = {k: v for k, v in r.items() if k != "error_code"}
+                    if "error_message" in row:
+                        row["note"] = row.pop("error_message")
+                    display.append(row)
+                _emit_table(display)
             return
         simple = all(isinstance(v, (str, int, float, bool, type(None))) for v in data.values())
         if simple:
             for key, value in data.items():
                 if key in _HUMAN_SKIP_FIELDS:
                     continue
-                typer.echo(f"{key}: {_to_cell(value)}")
+                cell = _to_cell(value)
+                if cell == "":
+                    continue
+                typer.echo(f"{key}: {cell}")
             return
     typer.echo(json.dumps(data, indent=2, default=str))
 

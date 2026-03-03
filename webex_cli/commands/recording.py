@@ -38,15 +38,34 @@ def _status_from_exception(exc: CliError) -> RecordingStatus | None:
     return None
 
 
+def _format_duration(seconds: int | float | None) -> str:
+    if seconds is None:
+        return ""
+    minutes = int(seconds) // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
+def _format_size(size_bytes: int | float | None) -> str:
+    if size_bytes is None:
+        return ""
+    b = int(size_bytes)
+    for unit, threshold in [("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)]:
+        if b >= threshold:
+            value = b / threshold
+            return f"{value:.1f} {unit}" if value < 100 else f"{int(value)} {unit}"
+    return f"{b} B"
+
+
 def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "recording_id": item.get("id") or item.get("recordingId"),
         "meeting_id": item.get("meetingId") or item.get("meeting_id"),
-        "occurrence_id": item.get("occurrenceId") or item.get("occurrence_id"),
         "started_at": item.get("createTime") or item.get("startedAt") or item.get("started_at"),
-        "duration_seconds": item.get("durationSeconds") or item.get("duration"),
-        "size_bytes": item.get("sizeBytes") or item.get("size"),
-        "downloadable": bool(item.get("downloadUrl") or item.get("download_url")),
+        "duration": _format_duration(item.get("durationSeconds") or item.get("duration")),
+        "size": _format_size(item.get("sizeBytes") or item.get("size")),
     }
 
 
