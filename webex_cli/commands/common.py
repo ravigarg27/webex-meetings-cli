@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import inspect
 import os
 import re
 from typing import Any, Callable, Iterator
@@ -87,11 +88,16 @@ def managed_client(
 ) -> Iterator[WebexApiClient]:
     factory = client_factory or build_client
     if token is None:
+        signature: inspect.Signature | None = None
         try:
-            client = factory(token)
-        except TypeError:
+            signature = inspect.signature(factory)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None and len(signature.parameters) == 0:
             # Some tests monkeypatch a zero-arg factory; support both forms.
             client = factory()
+        else:
+            client = factory(token)
     else:
         client = factory(token)
     try:
