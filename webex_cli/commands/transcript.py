@@ -50,6 +50,32 @@ def _extract_transcript_content(payload: dict[str, Any]) -> str | dict[str, Any]
     return payload
 
 
+def _normalize_get_format(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "txt":
+        return "text"
+    if normalized in {"text", "json"}:
+        return normalized
+    raise CliError(
+        DomainCode.VALIDATION_ERROR,
+        "`--format` must be one of: text, txt, json.",
+        details={"format": value},
+    )
+
+
+def _normalize_download_format(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "text":
+        return "txt"
+    if normalized in {"txt", "vtt", "json"}:
+        return normalized
+    raise CliError(
+        DomainCode.VALIDATION_ERROR,
+        "`--format` must be one of: txt, text, vtt, json.",
+        details={"format": value},
+    )
+
+
 def _compact_utc(value: str | None) -> str:
     if not value:
         return "unknown"
@@ -150,12 +176,7 @@ def get_transcript(
     command = "transcript get"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
-        if format_value not in {"text", "json"}:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--format` must be one of: text, json.",
-                details={"format": format_value},
-            )
+        format_value = _normalize_get_format(format_value)
         with managed_client(client_factory=build_client) as client:
             payload = client.get_transcript(meeting_id, format_value)
         content = _extract_transcript_content(payload)
@@ -198,6 +219,12 @@ def wait_transcript(
                             DomainCode.ARTIFACT_NOT_READY,
                             "Transcript wait timed out.",
                             details={"meeting_id": meeting_id, "timeout": timeout},
+                        )
+                    if not json_output:
+                        elapsed = int(time.time() - started)
+                        typer.echo(
+                            f"waiting for transcript: status=processing meeting_id={meeting_id} elapsed={elapsed}s",
+                            err=True,
                         )
                     time.sleep(interval)
                     continue
@@ -242,12 +269,7 @@ def download_transcript(
     command = "transcript download"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
-        if format_value not in {"txt", "vtt", "json"}:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--format` must be one of: txt, vtt, json.",
-                details={"format": format_value},
-            )
+        format_value = _normalize_download_format(format_value)
         with managed_client(client_factory=build_client) as client:
             payload = client.get_transcript(meeting_id, format_value)
         if format_value == "json":
@@ -277,24 +299,17 @@ def batch_transcripts(
     download_dir: str = typer.Option(..., "--download-dir"),
     tz: str | None = typer.Option(None, "--tz"),
     format_value: str = typer.Option("txt", "--format"),
-    continue_on_error: bool = typer.Option(False, "--continue-on-error"),
-    fail_fast: bool = typer.Option(False, "--fail-fast"),
+    continue_on_error: bool = typer.Option(
+        True,
+        "--continue-on-error/--fail-fast",
+        help="Continue processing all meetings or stop at first failure.",
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     command = "transcript batch"
     try:
-        if format_value not in {"txt", "vtt", "json"}:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--format` must be one of: txt, vtt, json.",
-                details={"format": format_value},
-            )
-        if continue_on_error and fail_fast:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "Use only one mode flag: --continue-on-error or --fail-fast.",
-            )
-        continue_mode = not fail_fast
+        format_value = _normalize_download_format(format_value)
+        continue_mode = continue_on_error
 
         from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
         with managed_client(client_factory=build_client) as client:
@@ -314,8 +329,11 @@ def batch_transcripts(
             success = 0
             skipped = 0
             failed = 0
-            for meeting in meetings:
+            total = len(meetings)
+            for index, meeting in enumerate(meetings, start=1):
                 meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
+                if not json_output:
+                    typer.echo(f"[{index}/{total}] processing meeting_id={meeting_id or 'unknown'}", err=True)
                 if not meeting_id:
                     skipped += 1
                     results.append(

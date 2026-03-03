@@ -38,14 +38,14 @@ class _UnknownRecordingStatusClient:
 
 
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _AmbiguousRecordingClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
         recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
     assert exc.value.exit_code == 2
 
 
 def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _DownloadRecordingClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _DownloadRecordingClient())
     tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     target = tmp_dir / "out.mp4"
@@ -67,21 +67,21 @@ def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> Non
 
 
 def test_recording_status_without_status_defaults_processing(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _RecordingStatusNoFieldClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _RecordingStatusNoFieldClient())
     recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["status"] == "processing"
 
 
 def test_recording_status_rejects_meeting_recording_mismatch(monkeypatch) -> None:
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _MismatchedRecordingClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _MismatchedRecordingClient())
     with pytest.raises(typer.Exit) as exc:
         recording_commands.status_recording(meeting_id="m1", recording_id="r1", json_output=True)
     assert exc.value.exit_code == 2
 
 
 def test_recording_status_unknown_status_warns(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _UnknownRecordingStatusClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _UnknownRecordingStatusClient())
     recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["status"] == "failed"

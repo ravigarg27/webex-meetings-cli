@@ -24,7 +24,7 @@ meeting_app = typer.Typer(help="Meeting commands")
 def list_meetings(
     from_value: str = typer.Option(..., "--from"),
     to_value: str = typer.Option(..., "--to"),
-    participant: str = typer.Option("me", "--participant"),
+    participant: str = typer.Option("me", "--participant", hidden=True),
     tz: str | None = typer.Option(None, "--tz"),
     page_size: int = typer.Option(50, "--page-size"),
     page_token: str | None = typer.Option(None, "--page-token"),

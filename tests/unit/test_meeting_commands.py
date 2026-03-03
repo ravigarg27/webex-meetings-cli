@@ -39,7 +39,7 @@ class _PagedMeetingClient:
 
 def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     client = _PagedMeetingClient()
-    monkeypatch.setattr(meeting_commands, "build_client", lambda: client)
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
     meeting_commands.list_meetings(
         from_value="2026-01-01",
         to_value="2026-01-03",
@@ -67,4 +67,3 @@ def test_meeting_list_rejects_invalid_participant() -> None:
             json_output=True,
         )
     assert exc.value.exit_code == 2
-

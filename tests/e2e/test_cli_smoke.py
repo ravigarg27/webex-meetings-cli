@@ -1,6 +1,7 @@
 import os
 import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -75,9 +76,9 @@ class _FakeStore:
 def _mock_default_mode(monkeypatch):
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: _FakeStore())
-    monkeypatch.setattr(meeting_commands, "build_client", lambda: _FakeClient())
-    monkeypatch.setattr(transcript_commands, "build_client", lambda: _FakeClient())
-    monkeypatch.setattr(recording_commands, "build_client", lambda: _FakeClient())
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _FakeClient())
 
 
 def test_cli_smoke_mocked_mode(monkeypatch) -> None:
@@ -105,16 +106,20 @@ def test_cli_smoke_mocked_mode(monkeypatch) -> None:
 
 @pytest.mark.skipif(
     os.environ.get("WEBEX_E2E_LIVE") != "1"
-    or not os.environ.get("WEBEX_TEST_TOKEN")
-    or not os.environ.get("WEBEX_TEST_FROM")
-    or not os.environ.get("WEBEX_TEST_TO"),
-    reason="Live e2e requires WEBEX_E2E_LIVE=1, WEBEX_TEST_TOKEN, WEBEX_TEST_FROM, WEBEX_TEST_TO",
+    or not os.environ.get("WEBEX_TEST_TOKEN"),
+    reason="Live e2e requires WEBEX_E2E_LIVE=1 and WEBEX_TEST_TOKEN",
 )
 def test_cli_smoke_live_mode() -> None:
     runner = CliRunner()
     token = os.environ["WEBEX_TEST_TOKEN"]
-    date_from = os.environ["WEBEX_TEST_FROM"]
-    date_to = os.environ["WEBEX_TEST_TO"]
+    if os.environ.get("WEBEX_TEST_FROM") and os.environ.get("WEBEX_TEST_TO"):
+        date_from = os.environ["WEBEX_TEST_FROM"]
+        date_to = os.environ["WEBEX_TEST_TO"]
+    else:
+        lookback_days = int(os.environ.get("WEBEX_TEST_LAST_DAYS", "5"))
+        today = datetime.now(timezone.utc).date()
+        date_to = today.isoformat()
+        date_from = (today - timedelta(days=lookback_days)).isoformat()
 
     tmp_dir = Path(".test_tmp") / f"e2e-live-{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
