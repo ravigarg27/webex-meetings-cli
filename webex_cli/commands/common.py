@@ -10,7 +10,7 @@ import typer
 from webex_cli.client import WebexApiClient
 from webex_cli.config import CredentialStore, load_settings
 from webex_cli.errors import CliError, DomainCode
-from webex_cli.output.human import emit_error_human, emit_success_human
+from webex_cli.output.human import emit_error_human, emit_success_human, emit_warnings_human
 from webex_cli.output.json_renderer import emit_error_json, emit_success_json
 
 
@@ -18,6 +18,8 @@ def emit_success(command: str, data: object, as_json: bool, warnings: list[str] 
     if as_json:
         emit_success_json(command=command, data=data, warnings=warnings or [])
     else:
+        if warnings:
+            emit_warnings_human(warnings)
         emit_success_human(data)
 
 

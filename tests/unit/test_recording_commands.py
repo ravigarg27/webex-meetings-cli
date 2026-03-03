@@ -27,6 +27,11 @@ class _RecordingStatusNoFieldClient:
         return [{"id": "r1"}]
 
 
+class _MismatchedRecordingClient:
+    def get_recording(self, recording_id):
+        return {"id": recording_id, "meetingId": "other-meeting"}
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -61,3 +66,10 @@ def test_recording_status_without_status_defaults_processing(monkeypatch, capsys
     recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["status"] == "processing"
+
+
+def test_recording_status_rejects_meeting_recording_mismatch(monkeypatch) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda: _MismatchedRecordingClient())
+    with pytest.raises(typer.Exit) as exc:
+        recording_commands.status_recording(meeting_id="m1", recording_id="r1", json_output=True)
+    assert exc.value.exit_code == 2

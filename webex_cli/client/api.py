@@ -281,13 +281,18 @@ class WebexApiClient:
         return self._request_json("GET", f"/v1/recordings/{self._encoded(recording_id)}")
 
     def list_recordings_for_meeting(self, meeting_id: str) -> list[dict[str, Any]]:
-        payload = self._request_json(
-            "GET",
-            "/v1/recordings",
-            params={"meetingId": meeting_id, "max": 200},
-        )
-        items, _ = self._normalize_page(payload)
-        return items
+        all_items: list[dict[str, Any]] = []
+        token: str | None = None
+        while True:
+            params: dict[str, Any] = {"meetingId": meeting_id, "max": 200}
+            if token:
+                params["pageToken"] = token
+            payload = self._request_json("GET", "/v1/recordings", params=params)
+            items, token = self._normalize_page(payload)
+            all_items.extend(items)
+            if not token:
+                break
+        return all_items
 
     def download_recording(self, recording_id: str, quality: str) -> tuple[bytes, str]:
         metadata = self.get_recording(recording_id)

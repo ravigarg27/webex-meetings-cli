@@ -58,3 +58,12 @@ def test_login_json_emits_warning_for_fallback_backend(monkeypatch, capsys) -> N
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["warnings"] == ["INSECURE_CREDENTIAL_STORE"]
+
+
+def test_login_human_emits_warning_for_fallback_backend(monkeypatch, capsys) -> None:
+    fake_store = _FakeStore()
+    monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
+    auth_commands.login(token="token123", json_output=False)
+    captured = capsys.readouterr()
+    assert "warning: INSECURE_CREDENTIAL_STORE" in captured.err

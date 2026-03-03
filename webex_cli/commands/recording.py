@@ -41,7 +41,15 @@ def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
 
 def _resolve_recording(client, meeting_id: str, recording_id: str | None) -> dict[str, Any] | None:
     if recording_id:
-        return client.get_recording(recording_id)
+        item = client.get_recording(recording_id)
+        item_meeting_id = item.get("meetingId") or item.get("meeting_id")
+        if item_meeting_id and str(item_meeting_id) != meeting_id:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Provided recording does not belong to the provided meeting.",
+                details={"meeting_id": meeting_id, "recording_id": recording_id, "recording_meeting_id": item_meeting_id},
+            )
+        return item
     records = client.list_recordings_for_meeting(meeting_id)
     if len(records) == 0:
         return None

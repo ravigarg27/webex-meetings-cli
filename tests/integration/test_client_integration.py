@@ -77,3 +77,19 @@ def test_client_maps_transcript_disabled(monkeypatch) -> None:
     with pytest.raises(CliError) as exc:
         client.get_transcript_status("m1")
     assert exc.value.code == DomainCode.TRANSCRIPT_DISABLED
+
+
+def test_list_recordings_for_meeting_paginates(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/recordings")
+    responses = [
+        httpx.Response(200, request=request, json={"items": [{"id": "r1"}], "nextPageToken": "n1"}),
+        httpx.Response(200, request=request, json={"items": [{"id": "r2"}]}),
+    ]
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    items = client.list_recordings_for_meeting("m1")
+    assert [item["id"] for item in items] == ["r1", "r2"]
