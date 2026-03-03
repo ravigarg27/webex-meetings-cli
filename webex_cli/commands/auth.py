@@ -10,17 +10,26 @@ from webex_cli.commands.common import build_client, emit_success, fail, handle_u
 from webex_cli.config.credentials import CredentialRecord, CredentialStore
 from webex_cli.errors import CliError, DomainCode
 
-auth_app = typer.Typer(help="Authentication commands")
+auth_app = typer.Typer(help="Authenticate and manage stored Webex credentials.")
 
 
-@auth_app.command("login")
+@auth_app.command("login", help="Save a Webex token and verify it has the required access.")
 def login(
     token: Annotated[
         str | None,
-        typer.Option("--token", help="Webex token (disabled by default; prefer WEBEX_TOKEN or --token-stdin)"),
+        typer.Option(
+            "--token",
+            help=(
+                "Webex personal access token. Disabled by default to avoid shell history exposure. "
+                "Prefer WEBEX_TOKEN or --token-stdin."
+            ),
+        ),
     ] = None,
-    token_stdin: Annotated[bool, typer.Option("--token-stdin", help="Read Webex token from stdin.")] = False,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    token_stdin: Annotated[
+        bool,
+        typer.Option("--token-stdin", help="Read the token from stdin (e.g. echo $TOKEN | webex auth login --token-stdin)."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False,
 ) -> None:
     command = "auth login"
     try:
@@ -101,20 +110,20 @@ def login(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@auth_app.command("logout")
-def logout(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+@auth_app.command("logout", help="Remove stored credentials from this machine.")
+def logout(json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False) -> None:
     command = "auth logout"
     try:
         CredentialStore().clear()
-        emit_success(command, {"status": "logged_out"}, as_json=json_output)
+        emit_success(command, "Logged out.", as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@auth_app.command("whoami")
-def whoami(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+@auth_app.command("whoami", help="Show details about the currently authenticated user.")
+def whoami(json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False) -> None:
     command = "auth whoami"
     try:
         record = CredentialStore().load()

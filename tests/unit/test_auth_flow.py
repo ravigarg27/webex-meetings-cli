@@ -72,7 +72,7 @@ def test_login_human_emits_warning_for_fallback_backend(monkeypatch, capsys) -> 
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
     auth_commands.login(token=None, json_output=False)
     captured = capsys.readouterr()
-    assert "warning: INSECURE_CREDENTIAL_STORE" in captured.err
+    assert "Warning:" in captured.err and "plain-text file" in captured.err
 
 
 def test_login_supports_env_token(monkeypatch) -> None:

@@ -25,7 +25,7 @@ from webex_cli.models import TranscriptStatus, map_transcript_status
 from webex_cli.utils.files import atomic_write_bytes, sanitize_filename
 from webex_cli.utils.time import parse_time_range
 
-transcript_app = typer.Typer(help="Transcript commands")
+transcript_app = typer.Typer(help="Download and monitor Webex meeting transcripts.")
 
 
 def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
@@ -157,8 +157,11 @@ def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
     return str(transcript_id)
 
 
-@transcript_app.command("status")
-def status(meeting_id: str, json_output: bool = typer.Option(False, "--json")) -> None:
+@transcript_app.command("status", help="Check whether a transcript is available for a meeting.")
+def status(
+    meeting_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
     command = "transcript status"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
@@ -181,11 +184,11 @@ def status(meeting_id: str, json_output: bool = typer.Option(False, "--json")) -
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@transcript_app.command("get")
+@transcript_app.command("get", help="Print transcript content to stdout.")
 def get_transcript(
     meeting_id: str,
-    format_value: str = typer.Option("text", "--format"),
-    json_output: bool = typer.Option(False, "--json"),
+    format_value: str = typer.Option("text", "--format", help="Output format: text/txt (default) or json."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript get"
     try:
@@ -211,12 +214,12 @@ def get_transcript(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@transcript_app.command("wait")
+@transcript_app.command("wait", help="Block until a transcript is ready, or until the timeout is reached.")
 def wait_transcript(
     meeting_id: str,
-    timeout: int = typer.Option(600, "--timeout"),
-    interval: int = typer.Option(10, "--interval"),
-    json_output: bool = typer.Option(False, "--json"),
+    timeout: int = typer.Option(600, "--timeout", help="Maximum seconds to wait before giving up. Default: 600."),
+    interval: int = typer.Option(10, "--interval", help="Seconds between status checks. Default: 10."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript wait"
     try:
@@ -243,7 +246,7 @@ def wait_transcript(
                     if not json_output:
                         elapsed = int(time.time() - started)
                         typer.echo(
-                            f"waiting for transcript: status=processing meeting_id={meeting_id} elapsed={elapsed}s",
+                            f"Transcript still processing — next check in {interval}s ({elapsed}s elapsed)...",
                             err=True,
                         )
                     time.sleep(interval)
@@ -278,13 +281,13 @@ def wait_transcript(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@transcript_app.command("download")
+@transcript_app.command("download", help="Save a transcript to a file.")
 def download_transcript(
     meeting_id: str,
-    format_value: str = typer.Option(..., "--format"),
-    out: str = typer.Option(..., "--out"),
-    overwrite: bool = typer.Option(False, "--overwrite"),
-    json_output: bool = typer.Option(False, "--json"),
+    format_value: str = typer.Option(..., "--format", help="File format: txt (default), vtt, or json."),
+    out: str = typer.Option(..., "--out", help="Output file path."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the file if it already exists."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript download"
     try:
@@ -306,19 +309,19 @@ def download_transcript(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@transcript_app.command("batch")
+@transcript_app.command("batch", help="Download all available transcripts for meetings in a date range.")
 def batch_transcripts(
-    from_value: str = typer.Option(..., "--from"),
-    to_value: str = typer.Option(..., "--to"),
-    download_dir: str = typer.Option(..., "--download-dir"),
-    tz: str | None = typer.Option(None, "--tz"),
-    format_value: str = typer.Option("txt", "--format"),
+    from_value: str = typer.Option(..., "--from", help="Start of the date range. Accepts YYYY-MM-DD or ISO 8601."),
+    to_value: str = typer.Option(..., "--to", help="End of the date range. Accepts YYYY-MM-DD or ISO 8601."),
+    download_dir: str = typer.Option(..., "--download-dir", help="Directory to save transcript files."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    format_value: str = typer.Option("txt", "--format", help="File format for all downloads: txt (default), vtt, or json."),
     continue_on_error: bool = typer.Option(
         True,
         "--continue-on-error/--fail-fast",
-        help="Continue processing all meetings or stop at first failure.",
+        help="Continue processing remaining meetings after a failure, or stop immediately.",
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript batch"
     try:

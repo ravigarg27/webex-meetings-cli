@@ -17,17 +17,17 @@ from webex_cli.commands.common import (
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.utils.time import parse_time_range
 
-meeting_app = typer.Typer(help="Meeting commands")
+meeting_app = typer.Typer(help="List and inspect Webex meetings.")
 
 
-@meeting_app.command("list")
+@meeting_app.command("list", help="List meetings within a date range.")
 def list_meetings(
-    from_value: str = typer.Option(..., "--from"),
-    to_value: str = typer.Option(..., "--to"),
-    tz: str | None = typer.Option(None, "--tz"),
-    page_size: int = typer.Option(50, "--page-size"),
-    page_token: str | None = typer.Option(None, "--page-token"),
-    json_output: bool = typer.Option(False, "--json"),
+    from_value: str = typer.Option(..., "--from", help="Start of the date range. Accepts YYYY-MM-DD or ISO 8601 (e.g. 2026-01-15T09:00:00)."),
+    to_value: str = typer.Option(..., "--to", help="End of the date range. Accepts YYYY-MM-DD or ISO 8601."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York). Defaults to the value in settings, then the system timezone."),
+    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1–200)."),
+    page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting list"
     try:
@@ -75,8 +75,11 @@ def list_meetings(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@meeting_app.command("get")
-def get_meeting(meeting_id: str, json_output: bool = typer.Option(False, "--json")) -> None:
+@meeting_app.command("get", help="Fetch full details for a single meeting.")
+def get_meeting(
+    meeting_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
     command = "meeting get"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
@@ -104,8 +107,11 @@ def get_meeting(meeting_id: str, json_output: bool = typer.Option(False, "--json
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@meeting_app.command("join-url")
-def join_url(meeting_id: str, json_output: bool = typer.Option(False, "--json")) -> None:
+@meeting_app.command("join-url", help="Print the join URL for a meeting.")
+def join_url(
+    meeting_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
     command = "meeting join-url"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")

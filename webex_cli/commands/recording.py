@@ -21,7 +21,7 @@ from webex_cli.models import RecordingStatus, map_recording_status
 from webex_cli.utils.files import atomic_write_bytes
 from webex_cli.utils.time import parse_time_range
 
-recording_app = typer.Typer(help="Recording commands")
+recording_app = typer.Typer(help="List and download Webex meeting recordings.")
 
 
 def _status_from_exception(exc: CliError) -> RecordingStatus | None:
@@ -101,14 +101,14 @@ def _resolve_recording(client: WebexApiClient, meeting_id: str, recording_id: st
     return records[0]
 
 
-@recording_app.command("list")
+@recording_app.command("list", help="List recordings within a date range.")
 def list_recordings(
-    from_value: str = typer.Option(..., "--from"),
-    to_value: str = typer.Option(..., "--to"),
-    tz: str | None = typer.Option(None, "--tz"),
-    page_size: int = typer.Option(50, "--page-size"),
-    page_token: str | None = typer.Option(None, "--page-token"),
-    json_output: bool = typer.Option(False, "--json"),
+    from_value: str = typer.Option(..., "--from", help="Start of the date range. Accepts YYYY-MM-DD or ISO 8601 (e.g. 2026-01-15T09:00:00)."),
+    to_value: str = typer.Option(..., "--to", help="End of the date range. Accepts YYYY-MM-DD or ISO 8601."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York). Defaults to the value in settings, then the system timezone."),
+    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1–200)."),
+    page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording list"
     try:
@@ -143,11 +143,11 @@ def list_recordings(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@recording_app.command("status")
+@recording_app.command("status", help="Check whether a recording is available for a meeting.")
 def status_recording(
     meeting_id: str,
-    recording_id: str | None = typer.Option(None, "--recording-id"),
-    json_output: bool = typer.Option(False, "--json"),
+    recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording status"
     try:
@@ -191,14 +191,14 @@ def status_recording(
         handle_unexpected(command, as_json=json_output, exc=exc)
 
 
-@recording_app.command("download")
+@recording_app.command("download", help="Download a recording to a file.")
 def download_recording(
     meeting_id: str,
-    out: str = typer.Option(..., "--out"),
-    recording_id: str | None = typer.Option(None, "--recording-id"),
-    quality: str = typer.Option("best", "--quality"),
-    overwrite: bool = typer.Option(False, "--overwrite"),
-    json_output: bool = typer.Option(False, "--json"),
+    out: str = typer.Option(..., "--out", help="Output file path."),
+    recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
+    quality: str = typer.Option("best", "--quality", help="Preferred video quality: best (default), high, or medium. Falls back to the next available quality."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the output file if it already exists."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording download"
     try:
