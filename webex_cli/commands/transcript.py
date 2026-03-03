@@ -41,15 +41,6 @@ def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
     return None
 
 
-def _extract_transcript_content(payload: dict[str, Any]) -> str | dict[str, Any]:
-    if "content" in payload:
-        return payload["content"]
-    if "text" in payload:
-        return payload["text"]
-    if "transcript" in payload:
-        return payload["transcript"]
-    return payload
-
 
 def _normalize_get_format(value: str) -> str:
     normalized = value.strip().lower()
@@ -121,33 +112,49 @@ def _batch_filename(meeting: dict[str, Any], format_value: str, artifact_id: str
 def _read_transcript_status(client: WebexApiClient, meeting_id: str) -> tuple[TranscriptStatus, dict[str, Any], list[str]]:
     warnings: list[str] = []
     try:
-        payload = client.get_transcript_status(meeting_id)
+        items = client.list_transcripts(meeting_id)
     except CliError as exc:
         mapped = _status_from_exception(exc)
         if mapped is None:
             raise
         return mapped, {"meeting_id": meeting_id}, warnings
-    raw_status = payload.get("status") or payload.get("state")
-    status = map_transcript_status(raw_status)
-    if raw_status and status == TranscriptStatus.FAILED:
-        known = {
-            "processing",
-            "in_progress",
-            "ready",
-            "available",
-            "failed",
-            "error",
-            "no_access",
-            "forbidden",
-            "not_found",
-            "missing",
-            "not_recorded",
-            "disabled",
-            "transcript_disabled",
-        }
-        if str(raw_status).lower() not in known:
-            warnings.append("UNMAPPED_TRANSCRIPT_STATUS")
-    return status, payload, warnings
+    if not items:
+        return TranscriptStatus.NOT_FOUND, {"meeting_id": meeting_id}, warnings
+    transcript = items[0]
+    raw_status = transcript.get("status") or transcript.get("state")
+    if raw_status:
+        status = map_transcript_status(raw_status)
+        if status == TranscriptStatus.FAILED:
+            known = {
+                "processing", "in_progress", "ready", "available",
+                "failed", "error", "no_access", "forbidden",
+                "not_found", "missing", "not_recorded",
+                "disabled", "transcript_disabled",
+            }
+            if str(raw_status).lower() not in known:
+                warnings.append("UNMAPPED_TRANSCRIPT_STATUS")
+    else:
+        status = TranscriptStatus.READY
+    transcript["meeting_id"] = meeting_id
+    return status, transcript, warnings
+
+
+def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
+    items = client.list_transcripts(meeting_id)
+    if not items:
+        raise CliError(
+            DomainCode.NOT_FOUND,
+            "No transcript found for meeting.",
+            details={"meeting_id": meeting_id},
+        )
+    transcript_id = items[0].get("id")
+    if not transcript_id:
+        raise CliError(
+            DomainCode.NOT_FOUND,
+            "Transcript ID missing from upstream payload.",
+            details={"meeting_id": meeting_id},
+        )
+    return str(transcript_id)
 
 
 @transcript_app.command("status")
@@ -185,8 +192,14 @@ def get_transcript(
         meeting_id = validate_id(meeting_id, "meeting_id")
         format_value = _normalize_get_format(format_value)
         with managed_client(client_factory=build_client) as client:
-            payload = client.get_transcript(meeting_id, format_value)
-        content = _extract_transcript_content(payload)
+            transcript_id = _resolve_transcript_id(client, meeting_id)
+            content_bytes = client.download_transcript(transcript_id, format_value)
+        content = content_bytes.decode("utf-8")
+        if format_value == "json":
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError:
+                pass
         emit_success(
             command,
             {"meeting_id": meeting_id, "format": format_value, "content": content},
@@ -278,14 +291,8 @@ def download_transcript(
         meeting_id = validate_id(meeting_id, "meeting_id")
         api_format, output_format = _normalize_download_format(format_value)
         with managed_client(client_factory=build_client) as client:
-            payload = client.get_transcript(meeting_id, api_format)
-        if output_format == "json":
-            data_bytes = json.dumps(payload, indent=2).encode("utf-8")
-        else:
-            content = _extract_transcript_content(payload)
-            if isinstance(content, dict):
-                content = json.dumps(content, indent=2)
-            data_bytes = str(content).encode("utf-8")
+            transcript_id = _resolve_transcript_id(client, meeting_id)
+            data_bytes = client.download_transcript(transcript_id, api_format)
         output_path = Path(out)
         atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
         emit_success(
@@ -324,7 +331,6 @@ def batch_transcripts(
                 lambda token: client.list_meetings(
                     from_utc=from_utc,
                     to_utc=to_utc,
-                    participant="me",
                     page_size=50,
                     page_token=token,
                 )
@@ -386,16 +392,10 @@ def batch_transcripts(
                         )
                         continue
 
-                    payload = client.get_transcript(meeting_id, api_format)
-                    if output_format == "json":
-                        content = json.dumps(payload, indent=2).encode("utf-8")
-                    else:
-                        raw = _extract_transcript_content(payload)
-                        if isinstance(raw, dict):
-                            raw = json.dumps(raw, indent=2)
-                        content = str(raw).encode("utf-8")
-                    artifact_id = payload.get("id") or payload.get("transcriptId")
-                    download_url = payload.get("downloadUrl") or payload.get("download_url")
+                    transcript_id = _resolve_transcript_id(client, meeting_id)
+                    content = client.download_transcript(transcript_id, api_format)
+                    artifact_id = transcript_id
+                    download_url = None
                     filename = _batch_filename(meeting, output_format, artifact_id=artifact_id, download_url=download_url)
                     out_path = target_dir / filename
                     atomic_write_bytes(out_path, content, overwrite=False)

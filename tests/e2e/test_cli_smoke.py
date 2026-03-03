@@ -28,7 +28,7 @@ class _FakeClient:
     def probe_meetings_access(self):
         return None
 
-    def list_meetings(self, **kwargs):
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):
         return ([{"id": "m1", "title": "Meeting", "start": "2026-01-01T01:00:00Z"}], None)
 
     def get_meeting(self, meeting_id):
@@ -37,13 +37,13 @@ class _FakeClient:
     def get_meeting_join_url(self, meeting_id):
         return {"joinWebUrl": "https://example.test/join"}
 
-    def get_transcript_status(self, meeting_id):
-        return {"status": "ready", "updatedAt": "2026-01-01T02:00:00Z"}
+    def list_transcripts(self, meeting_id):
+        return [{"id": "t1", "status": "ready", "updatedAt": "2026-01-01T02:00:00Z"}]
 
-    def get_transcript(self, meeting_id, format_value):
+    def download_transcript(self, transcript_id, format_value):
         if format_value == "json":
-            return {"id": "t1", "content": {"text": "hello"}}
-        return {"id": "t1", "content": "hello world"}
+            return b'{"text": "hello"}'
+        return b"hello world"
 
     def list_recordings(self, **kwargs):
         return ([{"id": "r1", "meetingId": "m1", "createTime": "2026-01-01T03:00:00Z"}], None)

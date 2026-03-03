@@ -37,6 +37,10 @@ def _parse_dt(value: str, tz_name: str | None) -> datetime:
         ) from exc
 
 
+def _utc_iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def parse_time_range(from_value: str, to_value: str, tz_name: str | None) -> tuple[str, str]:
     start = _parse_dt(from_value, tz_name).astimezone(timezone.utc)
     end = _parse_dt(to_value, tz_name).astimezone(timezone.utc)
@@ -44,6 +48,6 @@ def parse_time_range(from_value: str, to_value: str, tz_name: str | None) -> tup
         raise CliError(
             DomainCode.VALIDATION_ERROR,
             "`--from` must be earlier than `--to`.",
-            details={"from": start.isoformat(), "to": end.isoformat()},
+            details={"from": _utc_iso(start), "to": _utc_iso(end)},
         )
-    return start.isoformat(), end.isoformat()
+    return _utc_iso(start), _utc_iso(end)

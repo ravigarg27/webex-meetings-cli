@@ -24,7 +24,6 @@ meeting_app = typer.Typer(help="Meeting commands")
 def list_meetings(
     from_value: str = typer.Option(..., "--from"),
     to_value: str = typer.Option(..., "--to"),
-    participant: str = typer.Option("me", "--participant", hidden=True),
     tz: str | None = typer.Option(None, "--tz"),
     page_size: int = typer.Option(50, "--page-size"),
     page_token: str | None = typer.Option(None, "--page-token"),
@@ -32,12 +31,6 @@ def list_meetings(
 ) -> None:
     command = "meeting list"
     try:
-        if participant != "me":
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--participant` only supports `me` in Phase 1.",
-                details={"participant": participant},
-            )
         if page_size < 1 or page_size > 200:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
@@ -50,7 +43,6 @@ def list_meetings(
                 lambda token: client.list_meetings(
                     from_utc=from_utc,
                     to_utc=to_utc,
-                    participant=participant,
                     page_size=page_size,
                     page_token=token,
                 ),
@@ -58,15 +50,16 @@ def list_meetings(
             )
         normalized: list[dict[str, Any]] = []
         for item in items:
-            host_emails = item.get("hostEmails") or item.get("host_emails") or []
             normalized.append(
                 {
                     "meeting_id": item.get("id") or item.get("meetingId"),
-                    "meeting_uuid": item.get("meetingUuid") or item.get("meetingUUID"),
+                    "series_id": item.get("meetingSeriesId"),
                     "title": item.get("title") or item.get("topic") or "",
                     "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
                     "ended_at": item.get("end") or item.get("endedAt") or item.get("ended_at"),
-                    "host_email": host_emails[0] if host_emails else None,
+                    "host_email": item.get("hostEmail") or item.get("host_email"),
+                    "host_name": item.get("hostDisplayName"),
+                    "site_url": item.get("siteUrl"),
                 }
             )
         normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)

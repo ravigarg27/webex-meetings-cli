@@ -11,28 +11,28 @@ from webex_cli.errors import CliError, DomainCode
 
 
 class _TranscriptClientStatusNotFound:
-    def get_transcript_status(self, meeting_id):
-        raise CliError(DomainCode.NOT_FOUND, "missing")
+    def list_transcripts(self, meeting_id):
+        return []
 
 
 class _TranscriptClientWaitReady:
     def __init__(self) -> None:
         self.calls = 0
 
-    def get_transcript_status(self, meeting_id):
+    def list_transcripts(self, meeting_id):
         self.calls += 1
         if self.calls == 1:
-            return {"status": "processing"}
-        return {"status": "ready", "updatedAt": "2026-03-02T00:00:00Z"}
+            return [{"id": "t1", "status": "processing"}]
+        return [{"id": "t1", "status": "ready", "updatedAt": "2026-03-02T00:00:00Z"}]
 
 
 class _TranscriptClientWaitNoAccess:
-    def get_transcript_status(self, meeting_id):
+    def list_transcripts(self, meeting_id):
         raise CliError(DomainCode.NO_ACCESS, "forbidden")
 
 
 class _TranscriptClientDisabled:
-    def get_transcript_status(self, meeting_id):
+    def list_transcripts(self, meeting_id):
         raise CliError(DomainCode.TRANSCRIPT_DISABLED, "disabled")
 
 
@@ -40,9 +40,12 @@ class _TranscriptFormatClient:
     def __init__(self) -> None:
         self.last_format = None
 
-    def get_transcript(self, meeting_id, format_value):
+    def list_transcripts(self, meeting_id):
+        return [{"id": "t1"}]
+
+    def download_transcript(self, transcript_id, format_value):
         self.last_format = format_value
-        return {"content": "ok"}
+        return b"ok"
 
 
 def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:

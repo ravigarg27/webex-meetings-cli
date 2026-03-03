@@ -105,7 +105,6 @@ def _resolve_recording(client: WebexApiClient, meeting_id: str, recording_id: st
 def list_recordings(
     from_value: str = typer.Option(..., "--from"),
     to_value: str = typer.Option(..., "--to"),
-    participant: str = typer.Option("me", "--participant", hidden=True),
     tz: str | None = typer.Option(None, "--tz"),
     page_size: int = typer.Option(50, "--page-size"),
     page_token: str | None = typer.Option(None, "--page-token"),
@@ -113,12 +112,6 @@ def list_recordings(
 ) -> None:
     command = "recording list"
     try:
-        if participant != "me":
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--participant` only supports `me` in Phase 1.",
-                details={"participant": participant},
-            )
         if page_size < 1 or page_size > 200:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
@@ -131,7 +124,6 @@ def list_recordings(
                 lambda token: client.list_recordings(
                     from_utc=from_utc,
                     to_utc=to_utc,
-                    participant=participant,
                     page_size=page_size,
                     page_token=token,
                 ),

@@ -347,12 +347,12 @@ class WebexApiClient:
 
     def probe_meetings_access(self) -> None:
         now = datetime.now(timezone.utc)
-        start = (now - timedelta(days=1)).isoformat()
-        end = now.isoformat()
+        start = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         self._request_json(
             "GET",
             "/v1/meetings",
-            params={"from": start, "to": end, "max": 1},
+            params={"from": start, "to": end, "meetingType": "meeting", "max": 1},
         )
 
     @staticmethod
@@ -377,11 +377,19 @@ class WebexApiClient:
         *,
         from_utc: str,
         to_utc: str,
-        participant: str,
+        meeting_type: str = "meeting",
         page_size: int,
         page_token: str | None,
+        host_email: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        params: dict[str, Any] = {"from": from_utc, "to": to_utc, "max": page_size, "participant": participant}
+        params: dict[str, Any] = {
+            "from": from_utc,
+            "to": to_utc,
+            "meetingType": meeting_type,
+            "max": page_size,
+        }
+        if host_email:
+            params["hostEmail"] = host_email
         if page_token:
             params["pageToken"] = page_token
         payload = self._request_json("GET", "/v1/meetings", params=params)
@@ -393,28 +401,37 @@ class WebexApiClient:
     def get_meeting_join_url(self, meeting_id: str) -> dict[str, Any]:
         return self.get_meeting(meeting_id)
 
-    def get_transcript_status(self, meeting_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/meetingTranscripts/{self._encoded(meeting_id)}")
-
-    def get_transcript(self, meeting_id: str, format_value: str) -> dict[str, Any]:
-        return self._request_json(
+    def list_transcripts(self, meeting_id: str) -> list[dict[str, Any]]:
+        payload = self._request_json(
             "GET",
-            f"/v1/meetingTranscripts/{self._encoded(meeting_id)}",
+            "/v1/meetingTranscripts",
+            params={"meetingId": meeting_id},
+        )
+        items = payload.get("items") or []
+        return items if isinstance(items, list) else []
+
+    def download_transcript(self, transcript_id: str, format_value: str) -> bytes:
+        response = self._request(
+            "GET",
+            f"/v1/meetingTranscripts/{self._encoded(transcript_id)}/download",
             params={"format": format_value},
             timeout_seconds=self.download_timeout_seconds,
         )
+        return response.content
 
     def list_recordings(
         self,
         *,
         from_utc: str,
         to_utc: str,
-        participant: str,
         page_size: int,
         page_token: str | None,
+        host_email: str | None = None,
         meeting_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        params: dict[str, Any] = {"from": from_utc, "to": to_utc, "max": page_size, "participant": participant}
+        params: dict[str, Any] = {"from": from_utc, "to": to_utc, "max": page_size}
+        if host_email:
+            params["hostEmail"] = host_email
         if page_token:
             params["pageToken"] = page_token
         if meeting_id:
