@@ -5,7 +5,15 @@ from typing import Any
 
 import typer
 
-from webex_cli.commands.common import build_client, emit_success, fail, fetch_all_pages, handle_unexpected, validate_id
+from webex_cli.commands.common import (
+    build_client,
+    emit_success,
+    fail,
+    fetch_all_pages,
+    handle_unexpected,
+    resolve_effective_timezone,
+    validate_id,
+)
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import RecordingStatus, map_recording_status
 from webex_cli.utils.files import atomic_write_bytes
@@ -37,6 +45,35 @@ def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
         "size_bytes": item.get("sizeBytes") or item.get("size"),
         "downloadable": bool(item.get("downloadUrl") or item.get("download_url")),
     }
+
+
+def _status_from_recording_item(item: dict[str, Any]) -> tuple[RecordingStatus, list[str]]:
+    warnings: list[str] = []
+    raw_status = item.get("status") or item.get("state")
+    if raw_status is None:
+        if item.get("downloadUrl") or item.get("download_url"):
+            return RecordingStatus.READY, warnings
+        return RecordingStatus.PROCESSING, warnings
+
+    status_value = map_recording_status(raw_status)
+    known = {
+        "processing",
+        "in_progress",
+        "ready",
+        "available",
+        "failed",
+        "error",
+        "no_access",
+        "forbidden",
+        "not_found",
+        "missing",
+        "not_recorded",
+        "disabled",
+        "recording_disabled",
+    }
+    if status_value == RecordingStatus.FAILED and str(raw_status).lower() not in known:
+        warnings.append("UNMAPPED_RECORDING_STATUS")
+    return status_value, warnings
 
 
 def _resolve_recording(client, meeting_id: str, recording_id: str | None) -> dict[str, Any] | None:
@@ -86,7 +123,7 @@ def list_recordings(
                 "`--page-size` must be between 1 and 200.",
                 details={"page_size": page_size},
             )
-        from_utc, to_utc = parse_time_range(from_value, to_value, tz)
+        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
         client = build_client()
         items, warnings = fetch_all_pages(
             lambda token: client.list_recordings(
@@ -143,14 +180,7 @@ def status_recording(
                 as_json=json_output,
             )
             return
-        raw_status = item.get("status") or item.get("state")
-        if raw_status is None:
-            if item.get("downloadUrl") or item.get("download_url"):
-                status_value = RecordingStatus.READY
-            else:
-                status_value = RecordingStatus.PROCESSING
-        else:
-            status_value = map_recording_status(raw_status)
+        status_value, warnings = _status_from_recording_item(item)
         emit_success(
             command,
             {
@@ -159,6 +189,7 @@ def status_recording(
                 "status": status_value.value,
             },
             as_json=json_output,
+            warnings=warnings,
         )
     except CliError as exc:
         fail(command, exc, as_json=json_output)

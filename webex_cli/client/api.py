@@ -153,7 +153,7 @@ class WebexApiClient:
                     raise last_error
                 retry_after_delay = self._retry_after_delay(response)
                 if retry_after_delay is not None:
-                    time.sleep(min(retry_after_delay, self.max_delay_seconds))
+                    time.sleep(max(0.0, retry_after_delay))
                 else:
                     wait = random.uniform(0, min(delay, self.max_delay_seconds))
                     time.sleep(wait)
@@ -188,6 +188,59 @@ class WebexApiClient:
                 "Upstream returned invalid JSON.",
                 details={"path": path},
             ) from exc
+
+    def _request_absolute(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout_seconds: int,
+        path_for_error: str,
+    ) -> httpx.Response:
+        delay = 0.5
+        last_error: CliError | None = None
+        for attempt in range(self.retry_attempts):
+            try:
+                client = self._get_client(timeout=timeout_seconds)
+                response = client.request(
+                    method=method,
+                    url=url,
+                    headers=self._headers(),
+                    timeout=timeout_seconds,
+                )
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                last_error = CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Network error while calling upstream.",
+                    details={"exception": str(exc)},
+                )
+                if attempt == self.retry_attempts - 1:
+                    raise last_error from exc
+                wait = random.uniform(0, min(delay, self.max_delay_seconds))
+                time.sleep(wait)
+                delay *= 2
+                continue
+
+            if response.status_code in {429} or response.status_code >= 500:
+                last_error = self._map_response_error(response, path=path_for_error)
+                if attempt == self.retry_attempts - 1:
+                    raise last_error
+                retry_after_delay = self._retry_after_delay(response)
+                if retry_after_delay is not None:
+                    time.sleep(max(0.0, retry_after_delay))
+                else:
+                    wait = random.uniform(0, min(delay, self.max_delay_seconds))
+                    time.sleep(wait)
+                delay *= 2
+                continue
+
+            if response.is_error:
+                raise self._map_response_error(response, path=path_for_error)
+            return response
+
+        if last_error:
+            raise last_error
+        raise CliError(DomainCode.INTERNAL_ERROR, "Retry loop ended unexpectedly.")
 
     def _request_bytes(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> bytes:
         response = self._request(
@@ -294,24 +347,44 @@ class WebexApiClient:
                 break
         return all_items
 
+    @staticmethod
+    def _select_download_link(metadata: dict[str, Any], quality: str) -> tuple[str | None, str]:
+        direct = metadata.get("downloadUrl") or metadata.get("download_url")
+        if direct:
+            actual_quality = str(metadata.get("quality") or quality)
+            return str(direct), actual_quality
+
+        links = metadata.get("temporaryDirectDownloadLinks") or {}
+        if not isinstance(links, dict):
+            return None, quality
+
+        normalized_links = {str(k).lower(): str(v) for k, v in links.items() if v}
+        canonical_order = ["best", "high", "medium"]
+        fallback_order = [quality] + [q for q in canonical_order if q != quality]
+        for candidate_quality in fallback_order:
+            url = normalized_links.get(candidate_quality)
+            if url:
+                return url, candidate_quality
+        # Fallback to any other upstream quality key when present.
+        for candidate_quality in sorted(normalized_links):
+            return normalized_links[candidate_quality], candidate_quality
+        return None, quality
+
     def download_recording(self, recording_id: str, quality: str) -> tuple[bytes, str]:
         metadata = self.get_recording(recording_id)
-        download_url = (
-            metadata.get("downloadUrl")
-            or metadata.get("download_url")
-            or metadata.get("temporaryDirectDownloadLinks", {}).get(quality)
-        )
+        download_url, actual_quality = self._select_download_link(metadata, quality)
         if not download_url:
             raise CliError(
                 DomainCode.NOT_FOUND,
                 "Recording download URL not available.",
                 details={"recording_id": recording_id},
             )
-        with httpx.Client(timeout=self.download_timeout_seconds) as client:
-            response = client.get(download_url, headers=self._headers())
-        if response.is_error:
-            raise self._map_response_error(response, path="/v1/recordings/download")
-        actual_quality = metadata.get("quality") or quality
+        response = self._request_absolute(
+            "GET",
+            download_url,
+            timeout_seconds=self.download_timeout_seconds,
+            path_for_error="/v1/recordings/download",
+        )
         return response.content, str(actual_quality)
 
     def close(self) -> None:

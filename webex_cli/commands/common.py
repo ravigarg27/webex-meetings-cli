@@ -62,6 +62,13 @@ def resolve_base_url() -> str:
     return base_url.rstrip("/")
 
 
+def resolve_effective_timezone(cli_tz: str | None) -> str | None:
+    if cli_tz:
+        return cli_tz
+    settings = load_settings()
+    return settings.default_tz
+
+
 def load_token() -> str:
     record = CredentialStore().load()
     return record.token

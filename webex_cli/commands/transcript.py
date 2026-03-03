@@ -9,7 +9,15 @@ from typing import Any
 
 import typer
 
-from webex_cli.commands.common import build_client, emit_success, fail, fetch_all_pages, handle_unexpected, validate_id
+from webex_cli.commands.common import (
+    build_client,
+    emit_success,
+    fail,
+    fetch_all_pages,
+    handle_unexpected,
+    resolve_effective_timezone,
+    validate_id,
+)
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import TranscriptStatus, map_transcript_status
 from webex_cli.utils.files import atomic_write_bytes, sanitize_filename
@@ -287,7 +295,7 @@ def batch_transcripts(
             )
         continue_mode = not fail_fast
 
-        from_utc, to_utc = parse_time_range(from_value, to_value, tz)
+        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
         client = build_client()
         meetings, warnings = fetch_all_pages(
             lambda token: client.list_meetings(

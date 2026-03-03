@@ -27,6 +27,8 @@ def _parse_dt(value: str, tz_name: str | None) -> datetime:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=tz_candidate)
         return dt
+    except CliError:
+        raise
     except Exception as exc:
         raise CliError(
             DomainCode.VALIDATION_ERROR,

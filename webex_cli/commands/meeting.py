@@ -4,7 +4,15 @@ from typing import Any
 
 import typer
 
-from webex_cli.commands.common import build_client, emit_success, fail, fetch_all_pages, handle_unexpected, validate_id
+from webex_cli.commands.common import (
+    build_client,
+    emit_success,
+    fail,
+    fetch_all_pages,
+    handle_unexpected,
+    resolve_effective_timezone,
+    validate_id,
+)
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.utils.time import parse_time_range
 
@@ -35,7 +43,7 @@ def list_meetings(
                 "`--page-size` must be between 1 and 200.",
                 details={"page_size": page_size},
             )
-        from_utc, to_utc = parse_time_range(from_value, to_value, tz)
+        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
         client = build_client()
         items, warnings = fetch_all_pages(
             lambda token: client.list_meetings(

@@ -32,6 +32,11 @@ class _MismatchedRecordingClient:
         return {"id": recording_id, "meetingId": "other-meeting"}
 
 
+class _UnknownRecordingStatusClient:
+    def list_recordings_for_meeting(self, meeting_id):
+        return [{"id": "r1", "status": "future_status"}]
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -73,3 +78,11 @@ def test_recording_status_rejects_meeting_recording_mismatch(monkeypatch) -> Non
     with pytest.raises(typer.Exit) as exc:
         recording_commands.status_recording(meeting_id="m1", recording_id="r1", json_output=True)
     assert exc.value.exit_code == 2
+
+
+def test_recording_status_unknown_status_warns(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda: _UnknownRecordingStatusClient())
+    recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["status"] == "failed"
+    assert payload["warnings"] == ["UNMAPPED_RECORDING_STATUS"]
