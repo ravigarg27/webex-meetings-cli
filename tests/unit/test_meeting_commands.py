@@ -1,5 +1,8 @@
 import json
 
+import pytest
+import typer
+
 from webex_cli.commands import meeting as meeting_commands
 
 
@@ -40,6 +43,7 @@ def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     meeting_commands.list_meetings(
         from_value="2026-01-01",
         to_value="2026-01-03",
+        last=None,
         tz="UTC",
         page_size=50,
         page_token=None,
@@ -49,3 +53,40 @@ def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     assert len(output["data"]["items"]) == 2
     assert output["data"]["next_page_token"] is None
     assert client.calls == [None, "t1"]
+
+
+def test_meeting_list_last_truncates_results(monkeypatch, capsys) -> None:
+    client = _PagedMeetingClient()
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
+    meeting_commands.list_meetings(
+        from_value=None,
+        to_value=None,
+        last=1,
+        tz="UTC",
+        page_size=50,
+        page_token=None,
+        json_output=True,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert len(output["data"]["items"]) == 1
+    assert output["data"]["items"][0]["meeting_id"] == "m1"
+
+
+def test_meeting_list_last_rejects_zero(monkeypatch) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _PagedMeetingClient())
+    with pytest.raises(typer.Exit) as exc:
+        meeting_commands.list_meetings(
+            from_value=None, to_value=None, last=0,
+            tz="UTC", page_size=50, page_token=None, json_output=True,
+        )
+    assert exc.value.exit_code != 0
+
+
+def test_meeting_list_last_conflicts_with_from_to(monkeypatch) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _PagedMeetingClient())
+    with pytest.raises(typer.Exit) as exc:
+        meeting_commands.list_meetings(
+            from_value="2026-01-01", to_value="2026-01-02", last=5,
+            tz="UTC", page_size=50, page_token=None, json_output=True,
+        )
+    assert exc.value.exit_code != 0

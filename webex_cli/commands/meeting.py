@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import typer
@@ -19,18 +20,54 @@ from webex_cli.utils.time import parse_time_range
 
 meeting_app = typer.Typer(help="List and inspect Webex meetings.")
 
+DEFAULT_LAST_LOOKBACK_DAYS = 30
 
-@meeting_app.command("list", help="List meetings within a date range.")
+
+def _normalize_meeting(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "meeting_id": item.get("id") or item.get("meetingId"),
+        "series_id": item.get("meetingSeriesId"),
+        "title": item.get("title") or item.get("topic") or "",
+        "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
+        "ended_at": item.get("end") or item.get("endedAt") or item.get("ended_at"),
+        "host_email": item.get("hostEmail") or item.get("host_email"),
+        "host_name": item.get("hostDisplayName"),
+        "site_url": item.get("siteUrl"),
+    }
+
+
+@meeting_app.command("list", help="List meetings within a date range or the last N meetings.")
 def list_meetings(
-    from_value: str = typer.Option(..., "--from", help="Start of the date range. Accepts YYYY-MM-DD or ISO 8601 (e.g. 2026-01-15T09:00:00)."),
-    to_value: str = typer.Option(..., "--to", help="End of the date range. Accepts YYYY-MM-DD or ISO 8601."),
-    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York). Defaults to the value in settings, then the system timezone."),
-    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1–200)."),
+    from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Required unless --last is used."),
+    to_value: str | None = typer.Option(None, "--to", help="End date (YYYY-MM-DD or ISO 8601). Required unless --last is used."),
+    last: int | None = typer.Option(None, "--last", help="Return the N most recent meetings (lookback: 30 days)."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting list"
     try:
+        if last is not None and (from_value is not None or to_value is not None):
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Use either --last or --from/--to, not both.",
+            )
+        if last is not None:
+            if last < 1:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--last` must be a positive integer.",
+                    details={"last": last},
+                )
+            now = datetime.now(timezone.utc)
+            to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if from_value is None or to_value is None:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Provide --from and --to, or use --last N.",
+            )
         if page_size < 1 or page_size > 200:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
@@ -48,21 +85,10 @@ def list_meetings(
                 ),
                 start_token=page_token,
             )
-        normalized: list[dict[str, Any]] = []
-        for item in items:
-            normalized.append(
-                {
-                    "meeting_id": item.get("id") or item.get("meetingId"),
-                    "series_id": item.get("meetingSeriesId"),
-                    "title": item.get("title") or item.get("topic") or "",
-                    "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
-                    "ended_at": item.get("end") or item.get("endedAt") or item.get("ended_at"),
-                    "host_email": item.get("hostEmail") or item.get("host_email"),
-                    "host_name": item.get("hostDisplayName"),
-                    "site_url": item.get("siteUrl"),
-                }
-            )
+        normalized = [_normalize_meeting(item) for item in items]
         normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
+        if last is not None:
+            normalized = normalized[:last]
         emit_success(
             command,
             {"items": normalized, "next_page_token": None},

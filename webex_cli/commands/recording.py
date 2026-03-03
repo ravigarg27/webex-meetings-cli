@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -101,17 +102,41 @@ def _resolve_recording(client: WebexApiClient, meeting_id: str, recording_id: st
     return records[0]
 
 
-@recording_app.command("list", help="List recordings within a date range.")
+DEFAULT_LAST_LOOKBACK_DAYS = 30
+
+
+@recording_app.command("list", help="List recordings within a date range or the last N recordings.")
 def list_recordings(
-    from_value: str = typer.Option(..., "--from", help="Start of the date range. Accepts YYYY-MM-DD or ISO 8601 (e.g. 2026-01-15T09:00:00)."),
-    to_value: str = typer.Option(..., "--to", help="End of the date range. Accepts YYYY-MM-DD or ISO 8601."),
-    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York). Defaults to the value in settings, then the system timezone."),
-    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1–200)."),
+    from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Required unless --last is used."),
+    to_value: str | None = typer.Option(None, "--to", help="End date (YYYY-MM-DD or ISO 8601). Required unless --last is used."),
+    last: int | None = typer.Option(None, "--last", help="Return the N most recent recordings (lookback: 30 days)."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording list"
     try:
+        if last is not None and (from_value is not None or to_value is not None):
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Use either --last or --from/--to, not both.",
+            )
+        if last is not None:
+            if last < 1:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--last` must be a positive integer.",
+                    details={"last": last},
+                )
+            now = datetime.now(timezone.utc)
+            to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if from_value is None or to_value is None:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Provide --from and --to, or use --last N.",
+            )
         if page_size < 1 or page_size > 200:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
@@ -131,6 +156,8 @@ def list_recordings(
             )
         normalized = [_normalize_recording(item) for item in items]
         normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
+        if last is not None:
+            normalized = normalized[:last]
         emit_success(
             command,
             {"items": normalized, "next_page_token": None},

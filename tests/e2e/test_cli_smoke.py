@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import uuid
@@ -91,6 +92,10 @@ def test_cli_smoke_mocked_mode(monkeypatch) -> None:
     assert runner.invoke(app, ["auth", "login"]).exit_code == 0
     assert runner.invoke(app, ["auth", "whoami", "--json"]).exit_code == 0
     assert runner.invoke(app, ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"]).exit_code == 0
+    last_result = runner.invoke(app, ["meeting", "list", "--last", "3", "--json"])
+    assert last_result.exit_code == 0
+    last_data = json.loads(last_result.stdout)
+    assert len(last_data["data"]["items"]) <= 3
     assert runner.invoke(app, ["transcript", "get", "m1", "--format", "text", "--json"]).exit_code == 0
     tmp_dir = Path(".test_tmp") / f"e2e-{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +148,10 @@ def test_cli_smoke_live_mode() -> None:
             ["meeting", "list", "--from", date_from, "--to", date_to, "--json"],
         )
         assert meeting_list.exit_code == 0, meeting_list.stdout
+        last_list = runner.invoke(app, ["meeting", "list", "--last", "5", "--json"])
+        assert last_list.exit_code == 0, last_list.stdout
+        last_data = json.loads(last_list.stdout)
+        assert len(last_data["data"]["items"]) <= 5
         logout = runner.invoke(app, ["auth", "logout", "--json"])
         assert logout.exit_code == 0, logout.stdout
     finally:
