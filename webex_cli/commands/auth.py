@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typer
 
-from webex_cli.commands.common import build_client, emit_success, fail, handle_unexpected
+from webex_cli.commands.common import build_client, emit_success, fail, handle_unexpected, managed_client
 from webex_cli.config.credentials import CredentialRecord, CredentialStore
 from webex_cli.errors import CliError, DomainCode
 
@@ -16,18 +16,18 @@ def login(
 ) -> None:
     command = "auth login"
     try:
-        client = build_client(token=token)
-        who = client.whoami()
-        try:
-            client.probe_meetings_access()
-        except CliError as exc:
-            if exc.code in {DomainCode.AUTH_INVALID, DomainCode.NO_ACCESS}:
-                raise CliError(
-                    DomainCode.AUTH_INVALID,
-                    "Token does not have required participant-meetings access.",
-                    details=exc.details,
-                ) from exc
-            raise
+        with managed_client(token=token, client_factory=build_client) as client:
+            who = client.whoami()
+            try:
+                client.probe_meetings_access()
+            except CliError as exc:
+                if exc.code in {DomainCode.AUTH_INVALID, DomainCode.NO_ACCESS}:
+                    raise CliError(
+                        DomainCode.AUTH_INVALID,
+                        "Token does not have required participant-meetings access.",
+                        details=exc.details,
+                    ) from exc
+                raise
         store = CredentialStore()
         backend = store.save(
             CredentialRecord(
@@ -80,8 +80,8 @@ def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
     command = "auth whoami"
     try:
         record = CredentialStore().load()
-        client = build_client(token=record.token)
-        who = client.whoami()
+        with managed_client(token=record.token, client_factory=build_client) as client:
+            who = client.whoami()
         warnings: list[str] = []
         if record.backend == "file_fallback":
             warnings.append("INSECURE_CREDENTIAL_STORE")

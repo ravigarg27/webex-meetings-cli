@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 import typer
@@ -76,6 +77,29 @@ def load_token() -> str:
 
 def build_client(token: str | None = None) -> WebexApiClient:
     return WebexApiClient(base_url=resolve_base_url(), token=token or load_token())
+
+
+@contextmanager
+def managed_client(
+    token: str | None = None,
+    *,
+    client_factory: Callable[[str | None], WebexApiClient] | None = None,
+) -> Iterator[WebexApiClient]:
+    factory = client_factory or build_client
+    if token is None:
+        try:
+            client = factory(token)
+        except TypeError:
+            # Some tests monkeypatch a zero-arg factory; support both forms.
+            client = factory()
+    else:
+        client = factory(token)
+    try:
+        yield client
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 def fetch_all_pages(

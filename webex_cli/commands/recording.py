@@ -11,6 +11,7 @@ from webex_cli.commands.common import (
     fail,
     fetch_all_pages,
     handle_unexpected,
+    managed_client,
     resolve_effective_timezone,
     validate_id,
 )
@@ -124,17 +125,17 @@ def list_recordings(
                 details={"page_size": page_size},
             )
         from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
-        client = build_client()
-        items, warnings = fetch_all_pages(
-            lambda token: client.list_recordings(
-                from_utc=from_utc,
-                to_utc=to_utc,
-                participant=participant,
-                page_size=page_size,
-                page_token=token,
-            ),
-            start_token=page_token,
-        )
+        with managed_client(client_factory=build_client) as client:
+            items, warnings = fetch_all_pages(
+                lambda token: client.list_recordings(
+                    from_utc=from_utc,
+                    to_utc=to_utc,
+                    participant=participant,
+                    page_size=page_size,
+                    page_token=token,
+                ),
+                start_token=page_token,
+            )
         normalized = [_normalize_recording(item) for item in items]
         normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
         emit_success(
@@ -160,19 +161,19 @@ def status_recording(
         meeting_id = validate_id(meeting_id, "meeting_id")
         if recording_id:
             recording_id = validate_id(recording_id, "recording_id")
-        client = build_client()
-        try:
-            item = _resolve_recording(client, meeting_id, recording_id)
-        except CliError as exc:
-            mapped = _status_from_exception(exc)
-            if mapped is not None:
-                emit_success(
-                    command,
-                    {"meeting_id": meeting_id, "recording_id": recording_id, "status": mapped.value},
-                    as_json=json_output,
-                )
-                return
-            raise
+        with managed_client(client_factory=build_client) as client:
+            try:
+                item = _resolve_recording(client, meeting_id, recording_id)
+            except CliError as exc:
+                mapped = _status_from_exception(exc)
+                if mapped is not None:
+                    emit_success(
+                        command,
+                        {"meeting_id": meeting_id, "recording_id": recording_id, "status": mapped.value},
+                        as_json=json_output,
+                    )
+                    return
+                raise
         if item is None:
             emit_success(
                 command,
@@ -217,14 +218,14 @@ def download_recording(
                 "`--quality` must be one of: best, high, medium.",
                 details={"quality": quality},
             )
-        client = build_client()
-        selected = _resolve_recording(client, meeting_id, recording_id)
-        if selected is None:
-            raise CliError(DomainCode.NOT_FOUND, "No recording found for meeting.", details={"meeting_id": meeting_id})
-        selected_id = selected.get("id") or selected.get("recordingId")
-        if not selected_id:
-            raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
-        content, actual_quality = client.download_recording(str(selected_id), quality)
+        with managed_client(client_factory=build_client) as client:
+            selected = _resolve_recording(client, meeting_id, recording_id)
+            if selected is None:
+                raise CliError(DomainCode.NOT_FOUND, "No recording found for meeting.", details={"meeting_id": meeting_id})
+            selected_id = selected.get("id") or selected.get("recordingId")
+            if not selected_id:
+                raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
+            content, actual_quality = client.download_recording(str(selected_id), quality)
         output_path = Path(out)
         atomic_write_bytes(output_path, content, overwrite=overwrite)
         warnings: list[str] = []

@@ -10,6 +10,7 @@ from webex_cli.commands.common import (
     fail,
     fetch_all_pages,
     handle_unexpected,
+    managed_client,
     resolve_effective_timezone,
     validate_id,
 )
@@ -44,17 +45,17 @@ def list_meetings(
                 details={"page_size": page_size},
             )
         from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
-        client = build_client()
-        items, warnings = fetch_all_pages(
-            lambda token: client.list_meetings(
-                from_utc=from_utc,
-                to_utc=to_utc,
-                participant=participant,
-                page_size=page_size,
-                page_token=token,
-            ),
-            start_token=page_token,
-        )
+        with managed_client(client_factory=build_client) as client:
+            items, warnings = fetch_all_pages(
+                lambda token: client.list_meetings(
+                    from_utc=from_utc,
+                    to_utc=to_utc,
+                    participant=participant,
+                    page_size=page_size,
+                    page_token=token,
+                ),
+                start_token=page_token,
+            )
         normalized: list[dict[str, Any]] = []
         for item in items:
             host_emails = item.get("hostEmails") or item.get("host_emails") or []
@@ -86,8 +87,8 @@ def get_meeting(meeting_id: str, json_output: bool = typer.Option(False, "--json
     command = "meeting get"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
-        client = build_client()
-        item = client.get_meeting(meeting_id)
+        with managed_client(client_factory=build_client) as client:
+            item = client.get_meeting(meeting_id)
         data = {
             "meeting_id": item.get("id") or meeting_id,
             "join_url": item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl"),
@@ -115,8 +116,8 @@ def join_url(meeting_id: str, json_output: bool = typer.Option(False, "--json"))
     command = "meeting join-url"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
-        client = build_client()
-        item = client.get_meeting_join_url(meeting_id)
+        with managed_client(client_factory=build_client) as client:
+            item = client.get_meeting_join_url(meeting_id)
         url = item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl")
         if not url:
             raise CliError(
