@@ -49,7 +49,10 @@ class CredentialStore:
         path = self._metadata_path()
         if not path.exists():
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
 
     def _save_fallback(self, token: str) -> None:
         cfg = config_dir()
@@ -57,7 +60,10 @@ class CredentialStore:
         path = fallback_credentials_path()
         payload: dict[str, Any] = {}
         if path.exists():
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = {}
         payload[self.profile] = {"token": token}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         if os.name != "nt":
@@ -67,7 +73,10 @@ class CredentialStore:
         path = fallback_credentials_path()
         if not path.exists():
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
         item = payload.get(self.profile)
         if not item:
             return None
@@ -133,7 +142,10 @@ class CredentialStore:
                 pass
         path = fallback_credentials_path()
         if path.exists():
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = {}
             if self.profile in payload:
                 payload.pop(self.profile)
                 path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
