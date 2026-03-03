@@ -238,6 +238,15 @@ class WebexApiClient:
     def get_recording(self, recording_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/v1/recordings/{self._encoded(recording_id)}")
 
+    def list_recordings_for_meeting(self, meeting_id: str) -> list[dict[str, Any]]:
+        payload = self._request_json(
+            "GET",
+            "/v1/recordings",
+            params={"meetingId": meeting_id, "max": 200},
+        )
+        items, _ = self._normalize_page(payload)
+        return items
+
     def download_recording(self, recording_id: str, quality: str) -> tuple[bytes, str]:
         metadata = self.get_recording(recording_id)
         download_url = (
