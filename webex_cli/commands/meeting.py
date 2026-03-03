@@ -52,7 +52,7 @@ def _normalize_meeting(item: dict[str, Any]) -> dict[str, Any]:
         "duration": _meeting_duration(item),
         "host_email": item.get("hostEmail") or item.get("host_email"),
         "host_name": item.get("hostDisplayName"),
-        "has_transcript": item.get("hasTranscript") or False,
+        "has_transcript": item.get("hasTranscription") or False,
         "has_recording": item.get("hasRecording") or False,
     }
 
