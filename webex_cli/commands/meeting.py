@@ -52,6 +52,8 @@ def _normalize_meeting(item: dict[str, Any]) -> dict[str, Any]:
         "duration": _meeting_duration(item),
         "host_email": item.get("hostEmail") or item.get("host_email"),
         "host_name": item.get("hostDisplayName"),
+        "has_transcript": item.get("hasTranscript") or False,
+        "has_recording": item.get("hasRecording") or False,
     }
 
 
@@ -130,15 +132,7 @@ def get_meeting(
         meeting_id = validate_id(meeting_id, "meeting_id")
         with managed_client(client_factory=build_client) as client:
             item = client.get_meeting(meeting_id)
-        data = {
-            "meeting_id": item.get("id") or meeting_id,
-            "title": item.get("title") or item.get("topic") or "",
-            "started_at": item.get("start") or item.get("startedAt") or item.get("started_at"),
-            "join_url": item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl"),
-            "transcript": "ready" if item.get("hasTranscript") is True else "unknown",
-            "recording": "ready" if item.get("hasRecording") is True else "unknown",
-        }
-        emit_success(command, data, as_json=json_output)
+        emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
