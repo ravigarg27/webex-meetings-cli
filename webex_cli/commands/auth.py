@@ -18,7 +18,7 @@ def _bool_option(value: bool | object) -> bool:
 
 @auth_app.command("login")
 def login(
-    token: str | None = typer.Option(None, "--token", help="Webex token (less secure; prefer WEBEX_TOKEN or --token-stdin)"),
+    token: str | None = typer.Option(None, "--token", help="Webex token (disabled by default; prefer WEBEX_TOKEN or --token-stdin)"),
     token_stdin: bool = typer.Option(False, "--token-stdin", help="Read Webex token from stdin."),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -26,6 +26,12 @@ def login(
     json_mode = _bool_option(json_output)
     read_stdin = _bool_option(token_stdin)
     try:
+        allow_insecure_token_arg = os.environ.get("WEBEX_ALLOW_INSECURE_TOKEN_ARG") == "1"
+        if token and not allow_insecure_token_arg:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Token via --token is disabled by default. Use WEBEX_TOKEN or --token-stdin. Set WEBEX_ALLOW_INSECURE_TOKEN_ARG=1 to override.",
+            )
         sources: list[tuple[str, str]] = []
         if token:
             sources.append(("cli_arg", token.strip()))

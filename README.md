@@ -37,8 +37,13 @@ webex auth login
 Alternative login methods:
 
 ```bash
-webex auth login --token "<token>"
 echo "<token>" | webex auth login --token-stdin
+```
+
+Legacy insecure token-arg mode (explicit opt-in):
+
+```bash
+WEBEX_ALLOW_INSECURE_TOKEN_ARG=1 webex auth login --token "<token>"
 ```
 
 Check identity:
@@ -92,7 +97,7 @@ webex recording download <meeting_id> --out ./recording.mp4
 
 ## Security Notes
 
-- Prefer `WEBEX_TOKEN` or `--token-stdin` over `--token` to avoid shell/process exposure.
+- Prefer `WEBEX_TOKEN` or `--token-stdin`; `--token` is blocked by default.
 - Fallback credential storage is used only if keyring is unavailable.
 - Recording download URLs are validated and local/private hosts are blocked.
 

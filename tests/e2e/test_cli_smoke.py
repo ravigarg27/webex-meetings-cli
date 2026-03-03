@@ -83,9 +83,10 @@ def _mock_default_mode(monkeypatch):
 
 def test_cli_smoke_mocked_mode(monkeypatch) -> None:
     _mock_default_mode(monkeypatch)
+    monkeypatch.setenv("WEBEX_TOKEN", "token123")
     runner = CliRunner()
 
-    assert runner.invoke(app, ["auth", "login", "--token", "token123"]).exit_code == 0
+    assert runner.invoke(app, ["auth", "login"]).exit_code == 0
     assert runner.invoke(app, ["auth", "whoami", "--json"]).exit_code == 0
     assert runner.invoke(app, ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"]).exit_code == 0
     assert runner.invoke(app, ["transcript", "get", "m1", "--format", "text", "--json"]).exit_code == 0
@@ -129,8 +130,9 @@ def test_cli_smoke_live_mode() -> None:
         # Isolate credential writes from developer machine state.
         os.environ["APPDATA"] = str(tmp_dir)
         os.environ["XDG_CONFIG_HOME"] = str(tmp_dir)
+        os.environ["WEBEX_TOKEN"] = token
 
-        login = runner.invoke(app, ["auth", "login", "--token", token, "--json"])
+        login = runner.invoke(app, ["auth", "login", "--json"])
         assert login.exit_code == 0, login.stdout
         whoami = runner.invoke(app, ["auth", "whoami", "--json"])
         assert whoami.exit_code == 0, whoami.stdout
@@ -150,4 +152,5 @@ def test_cli_smoke_live_mode() -> None:
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
             os.environ["XDG_CONFIG_HOME"] = old_xdg
+        os.environ.pop("WEBEX_TOKEN", None)
         shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -39,9 +39,10 @@ class _FakeStore:
 
 def test_login_saves_credentials(monkeypatch) -> None:
     fake_store = _FakeStore()
+    monkeypatch.setenv("WEBEX_TOKEN", "token123")
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
-    auth_commands.login(token="token123")
+    auth_commands.login(token=None)
     assert fake_store.saved is not None
     assert fake_store.saved.token == "token123"
 
@@ -55,23 +56,23 @@ def test_logout_clears_credentials(monkeypatch) -> None:
 
 def test_login_json_emits_warning_for_fallback_backend(monkeypatch, capsys) -> None:
     fake_store = _FakeStore()
+    monkeypatch.setenv("WEBEX_TOKEN", "token123")
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
-    auth_commands.login(token="token123", json_output=True)
+    auth_commands.login(token=None, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert "INSECURE_CREDENTIAL_STORE" in payload["warnings"]
-    assert "TOKEN_CLI_ARGUMENT_INSECURE" in payload["warnings"]
 
 
 def test_login_human_emits_warning_for_fallback_backend(monkeypatch, capsys) -> None:
     fake_store = _FakeStore()
+    monkeypatch.setenv("WEBEX_TOKEN", "token123")
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
-    auth_commands.login(token="token123", json_output=False)
+    auth_commands.login(token=None, json_output=False)
     captured = capsys.readouterr()
     assert "warning: INSECURE_CREDENTIAL_STORE" in captured.err
-    assert "warning: TOKEN_CLI_ARGUMENT_INSECURE" in captured.err
 
 
 def test_login_supports_env_token(monkeypatch) -> None:
@@ -86,7 +87,17 @@ def test_login_supports_env_token(monkeypatch) -> None:
 def test_login_rejects_multiple_token_sources(monkeypatch) -> None:
     fake_store = _FakeStore()
     monkeypatch.setenv("WEBEX_TOKEN", "env-token")
+    monkeypatch.setenv("WEBEX_ALLOW_INSECURE_TOKEN_ARG", "1")
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
     with pytest.raises(typer.Exit):
         auth_commands.login(token="cli-token", json_output=True)
+
+
+def test_login_rejects_cli_token_by_default(monkeypatch) -> None:
+    fake_store = _FakeStore()
+    monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
+    with pytest.raises(typer.Exit) as exc:
+        auth_commands.login(token="cli-token", json_output=True)
+    assert exc.value.exit_code == 2
