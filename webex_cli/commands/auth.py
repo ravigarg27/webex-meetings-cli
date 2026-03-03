@@ -2,22 +2,86 @@ from __future__ import annotations
 
 import typer
 
-from webex_cli.commands.common import emit_success
+from webex_cli.commands.common import build_client, emit_success, fail, handle_unexpected
+from webex_cli.config.credentials import CredentialRecord, CredentialStore
+from webex_cli.errors import CliError, DomainCode
 
 auth_app = typer.Typer(help="Authentication commands")
 
 
 @auth_app.command("login")
 def login(token: str = typer.Option(..., "--token", help="Webex token")) -> None:
-    emit_success("auth login", {"status": "not_implemented", "token_supplied": bool(token)}, as_json=False)
+    command = "auth login"
+    try:
+        client = build_client(token=token)
+        who = client.whoami()
+        try:
+            client.probe_meetings_access()
+        except CliError as exc:
+            if exc.code in {DomainCode.AUTH_INVALID, DomainCode.NO_ACCESS}:
+                raise CliError(
+                    DomainCode.AUTH_INVALID,
+                    "Token does not have required participant-meetings access.",
+                    details=exc.details,
+                ) from exc
+            raise
+        store = CredentialStore()
+        store.save(
+            CredentialRecord(
+                token=token,
+                user_id=who.get("user_id"),
+                display_name=who.get("display_name"),
+                primary_email=who.get("primary_email"),
+                org_id=who.get("org_id"),
+                site_url=who.get("site_url"),
+            )
+        )
+        emit_success(
+            command,
+            {
+                "user_id": who.get("user_id"),
+                "display_name": who.get("display_name"),
+                "primary_email": who.get("primary_email"),
+                "org_id": who.get("org_id"),
+                "site_url": who.get("site_url"),
+                "token_state": "valid",
+            },
+            as_json=False,
+        )
+    except CliError as exc:
+        fail(command, exc, as_json=False)
+    except Exception as exc:
+        handle_unexpected(command, as_json=False, exc=exc)
 
 
 @auth_app.command("logout")
 def logout() -> None:
-    emit_success("auth logout", {"status": "not_implemented"}, as_json=False)
+    command = "auth logout"
+    try:
+        CredentialStore().clear()
+        emit_success(command, {"status": "logged_out"}, as_json=False)
+    except CliError as exc:
+        fail(command, exc, as_json=False)
+    except Exception as exc:
+        handle_unexpected(command, as_json=False, exc=exc)
 
 
 @auth_app.command("whoami")
 def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
-    emit_success("auth whoami", {"status": "not_implemented"}, as_json=json_output)
-
+    command = "auth whoami"
+    try:
+        client = build_client()
+        who = client.whoami()
+        data = {
+            "user_id": who.get("user_id"),
+            "display_name": who.get("display_name"),
+            "primary_email": who.get("primary_email"),
+            "org_id": who.get("org_id"),
+            "site_url": who.get("site_url"),
+            "token_state": who.get("token_state", "valid"),
+        }
+        emit_success(command, data, as_json=json_output)
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
