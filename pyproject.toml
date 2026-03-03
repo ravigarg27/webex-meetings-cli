@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "webex-meetings-cli"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Webex meetings artifact CLI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,3 +26,5 @@ webex = "webex_cli.cli:app"
 [tool.setuptools.packages.find]
 include = ["webex_cli*"]
 
+[tool.setuptools.dynamic]
+version = {attr = "webex_cli.version.__version__"}

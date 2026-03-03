@@ -14,15 +14,17 @@ from webex_cli.errors import CliError, DomainCode
 SERVICE_NAME = "webex-cli"
 DEFAULT_PROFILE = "default"
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _WinDataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
 
 @dataclass
 class CredentialRecord:
     token: str
-    user_id: str | None = None
-    display_name: str | None = None
-    primary_email: str | None = None
-    org_id: str | None = None
-    site_url: str | None = None
     backend: str | None = None
 
 
@@ -135,11 +137,6 @@ class CredentialStore:
         metadata = self._load_metadata()
         return CredentialRecord(
             token=token,
-            user_id=metadata.get("user_id"),
-            display_name=metadata.get("display_name"),
-            primary_email=metadata.get("primary_email"),
-            org_id=metadata.get("org_id"),
-            site_url=metadata.get("site_url"),
             backend=metadata.get("credential_backend"),
         )
 
@@ -181,15 +178,9 @@ class CredentialStore:
 
     @staticmethod
     def _dpapi_encrypt(data: bytes) -> bytes:
-        import ctypes
-        from ctypes import wintypes
-
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
         in_buffer = ctypes.create_string_buffer(data)
-        in_blob = DATA_BLOB(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
-        out_blob = DATA_BLOB()
+        in_blob = _WinDataBlob(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+        out_blob = _WinDataBlob()
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
         if crypt32.CryptProtectData(ctypes.byref(in_blob), "webex-cli", None, None, None, 0, ctypes.byref(out_blob)) == 0:
@@ -201,15 +192,9 @@ class CredentialStore:
 
     @staticmethod
     def _dpapi_decrypt(data: bytes) -> bytes:
-        import ctypes
-        from ctypes import wintypes
-
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
         in_buffer = ctypes.create_string_buffer(data)
-        in_blob = DATA_BLOB(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
-        out_blob = DATA_BLOB()
+        in_blob = _WinDataBlob(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+        out_blob = _WinDataBlob()
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
         if crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)) == 0:

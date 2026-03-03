@@ -36,3 +36,18 @@ def test_load_settings_rejects_non_object_json(monkeypatch) -> None:
         assert exc.value.code == DomainCode.VALIDATION_ERROR
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_save_settings_writes_json_atomically(monkeypatch) -> None:
+    root, path = _temp_settings_path()
+    try:
+        monkeypatch.setattr(settings_module, "config_dir", lambda: root)
+        monkeypatch.setattr(settings_module, "settings_path", lambda: path)
+        settings_module.save_settings(
+            settings_module.Settings(api_base_url="https://webexapis.com", default_tz="UTC")
+        )
+        loaded = settings_module.load_settings()
+        assert loaded.api_base_url == "https://webexapis.com"
+        assert loaded.default_tz == "UTC"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

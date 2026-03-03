@@ -9,6 +9,7 @@ from typing import Any
 
 import typer
 
+from webex_cli.client.api import WebexApiClient
 from webex_cli.commands.common import (
     build_client,
     emit_success,
@@ -63,12 +64,12 @@ def _normalize_get_format(value: str) -> str:
     )
 
 
-def _normalize_download_format(value: str) -> str:
+def _normalize_download_format(value: str) -> tuple[str, str]:
     normalized = value.strip().lower()
-    if normalized == "text":
-        return "txt"
-    if normalized in {"txt", "vtt", "json"}:
-        return normalized
+    if normalized in {"text", "txt"}:
+        return ("text", "txt")
+    if normalized in {"vtt", "json"}:
+        return (normalized, normalized)
     raise CliError(
         DomainCode.VALIDATION_ERROR,
         "`--format` must be one of: txt, text, vtt, json.",
@@ -76,27 +77,33 @@ def _normalize_download_format(value: str) -> str:
     )
 
 
-def _compact_utc(value: str | None) -> str:
-    if not value:
-        return "unknown"
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    if value is None:
+        return None
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.strftime("%Y%m%dT%H%M%SZ")
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
+        return None
+
+
+def _compact_utc(value: str | None) -> str:
+    dt = _parse_iso_utc(value)
+    if dt is None:
         return "unknown"
+    return dt.strftime("%Y%m%dT%H%M%SZ")
 
 
 def _canonical_start_utc(meeting: dict[str, Any]) -> str:
     raw = meeting.get("start") or meeting.get("startedAt") or meeting.get("started_at")
     if not raw:
         return ""
-    try:
-        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    except Exception:
+    dt = _parse_iso_utc(raw if isinstance(raw, str) else str(raw))
+    if dt is None:
         return str(raw)
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _batch_filename(meeting: dict[str, Any], format_value: str, artifact_id: str | None, download_url: str | None) -> str:
@@ -111,7 +118,7 @@ def _batch_filename(meeting: dict[str, Any], format_value: str, artifact_id: str
     return f"{stem}.{format_value}"
 
 
-def _read_transcript_status(client, meeting_id: str) -> tuple[TranscriptStatus, dict[str, Any], list[str]]:
+def _read_transcript_status(client: WebexApiClient, meeting_id: str) -> tuple[TranscriptStatus, dict[str, Any], list[str]]:
     warnings: list[str] = []
     try:
         payload = client.get_transcript_status(meeting_id)
@@ -122,7 +129,7 @@ def _read_transcript_status(client, meeting_id: str) -> tuple[TranscriptStatus, 
         return mapped, {"meeting_id": meeting_id}, warnings
     raw_status = payload.get("status") or payload.get("state")
     status = map_transcript_status(raw_status)
-    if raw_status and map_transcript_status(raw_status).value == TranscriptStatus.FAILED.value:
+    if raw_status and status == TranscriptStatus.FAILED:
         known = {
             "processing",
             "in_progress",
@@ -269,10 +276,10 @@ def download_transcript(
     command = "transcript download"
     try:
         meeting_id = validate_id(meeting_id, "meeting_id")
-        format_value = _normalize_download_format(format_value)
+        api_format, output_format = _normalize_download_format(format_value)
         with managed_client(client_factory=build_client) as client:
-            payload = client.get_transcript(meeting_id, format_value)
-        if format_value == "json":
+            payload = client.get_transcript(meeting_id, api_format)
+        if output_format == "json":
             data_bytes = json.dumps(payload, indent=2).encode("utf-8")
         else:
             content = _extract_transcript_content(payload)
@@ -283,7 +290,7 @@ def download_transcript(
         atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
         emit_success(
             command,
-            {"meeting_id": meeting_id, "format": format_value, "output_path": str(output_path)},
+            {"meeting_id": meeting_id, "format": output_format, "output_path": str(output_path)},
             as_json=json_output,
         )
     except CliError as exc:
@@ -308,7 +315,7 @@ def batch_transcripts(
 ) -> None:
     command = "transcript batch"
     try:
-        format_value = _normalize_download_format(format_value)
+        api_format, output_format = _normalize_download_format(format_value)
         continue_mode = continue_on_error
 
         from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
@@ -379,8 +386,8 @@ def batch_transcripts(
                         )
                         continue
 
-                    payload = client.get_transcript(meeting_id, format_value)
-                    if format_value == "json":
+                    payload = client.get_transcript(meeting_id, api_format)
+                    if output_format == "json":
                         content = json.dumps(payload, indent=2).encode("utf-8")
                     else:
                         raw = _extract_transcript_content(payload)
@@ -389,7 +396,7 @@ def batch_transcripts(
                         content = str(raw).encode("utf-8")
                     artifact_id = payload.get("id") or payload.get("transcriptId")
                     download_url = payload.get("downloadUrl") or payload.get("download_url")
-                    filename = _batch_filename(meeting, format_value, artifact_id=artifact_id, download_url=download_url)
+                    filename = _batch_filename(meeting, output_format, artifact_id=artifact_id, download_url=download_url)
                     out_path = target_dir / filename
                     atomic_write_bytes(out_path, content, overwrite=False)
                     success += 1

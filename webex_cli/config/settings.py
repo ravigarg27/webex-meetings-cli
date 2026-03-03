@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
+import tempfile
 from typing import Any
 
 from webex_cli.config.paths import config_dir, settings_path
@@ -57,4 +60,19 @@ def save_settings(settings: Settings) -> None:
     cfg.mkdir(parents=True, exist_ok=True)
     path = settings_path()
     payload = {"api_base_url": settings.api_base_url, "default_tz": settings.default_tz}
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_atomic(path, payload)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, indent=2)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        Path(tmp_path).replace(path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    finally:
+        tmp = Path(tmp_path)
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)

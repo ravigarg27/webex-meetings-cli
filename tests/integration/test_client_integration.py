@@ -1,5 +1,6 @@
 import httpx
 import pytest
+import socket
 
 from webex_cli.client.api import WebexApiClient
 from webex_cli.errors import CliError, DomainCode
@@ -232,6 +233,30 @@ def test_download_recording_blocks_private_host(monkeypatch) -> None:
         return httpx.Response(200, request=request_meta, json={"id": "r1", "downloadUrl": "https://127.0.0.1/file.mp4"})
 
     monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    with pytest.raises(CliError) as exc:
+        client.download_recording("r1", "best")
+    assert exc.value.code == DomainCode.VALIDATION_ERROR
+
+
+def test_download_recording_blocks_host_resolving_to_private_ip(monkeypatch) -> None:
+    request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        return httpx.Response(
+            200,
+            request=request_meta,
+            json={"id": "r1", "downloadUrl": "https://download.example.test/file.mp4"},
+        )
+
+    def fake_getaddrinfo(host, port, type=0, proto=0, flags=0):
+        assert host == "download.example.test"
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ]
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    monkeypatch.setattr("webex_cli.client.api.socket.getaddrinfo", fake_getaddrinfo)
     client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
     with pytest.raises(CliError) as exc:
         client.download_recording("r1", "best")

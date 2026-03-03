@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Annotated
 
 import typer
 
@@ -12,19 +13,16 @@ from webex_cli.errors import CliError, DomainCode
 auth_app = typer.Typer(help="Authentication commands")
 
 
-def _bool_option(value: bool | object) -> bool:
-    return value if isinstance(value, bool) else False
-
-
 @auth_app.command("login")
 def login(
-    token: str | None = typer.Option(None, "--token", help="Webex token (disabled by default; prefer WEBEX_TOKEN or --token-stdin)"),
-    token_stdin: bool = typer.Option(False, "--token-stdin", help="Read Webex token from stdin."),
-    json_output: bool = typer.Option(False, "--json"),
+    token: Annotated[
+        str | None,
+        typer.Option("--token", help="Webex token (disabled by default; prefer WEBEX_TOKEN or --token-stdin)"),
+    ] = None,
+    token_stdin: Annotated[bool, typer.Option("--token-stdin", help="Read Webex token from stdin.")] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     command = "auth login"
-    json_mode = _bool_option(json_output)
-    read_stdin = _bool_option(token_stdin)
     try:
         allow_insecure_token_arg = os.environ.get("WEBEX_ALLOW_INSECURE_TOKEN_ARG") == "1"
         if token and not allow_insecure_token_arg:
@@ -38,7 +36,7 @@ def login(
         env_token = os.environ.get("WEBEX_TOKEN")
         if env_token:
             sources.append(("env", env_token.strip()))
-        if read_stdin:
+        if token_stdin:
             stdin_token = sys.stdin.read().strip()
             if not stdin_token:
                 raise CliError(DomainCode.VALIDATION_ERROR, "No token read from stdin.")
@@ -75,11 +73,6 @@ def login(
         backend = store.save(
             CredentialRecord(
                 token=resolved_token,
-                user_id=who.get("user_id"),
-                display_name=who.get("display_name"),
-                primary_email=who.get("primary_email"),
-                org_id=who.get("org_id"),
-                site_url=who.get("site_url"),
                 backend=None,
             )
         )
@@ -99,32 +92,30 @@ def login(
                 "token_state": "valid",
                 "credential_backend": backend,
             },
-            as_json=json_mode,
+            as_json=json_output,
             warnings=warnings,
         )
     except CliError as exc:
-        fail(command, exc, as_json=json_mode)
+        fail(command, exc, as_json=json_output)
     except Exception as exc:
-        handle_unexpected(command, as_json=json_mode, exc=exc)
+        handle_unexpected(command, as_json=json_output, exc=exc)
 
 
 @auth_app.command("logout")
-def logout(json_output: bool = typer.Option(False, "--json")) -> None:
+def logout(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     command = "auth logout"
-    json_mode = _bool_option(json_output)
     try:
         CredentialStore().clear()
-        emit_success(command, {"status": "logged_out"}, as_json=json_mode)
+        emit_success(command, {"status": "logged_out"}, as_json=json_output)
     except CliError as exc:
-        fail(command, exc, as_json=json_mode)
+        fail(command, exc, as_json=json_output)
     except Exception as exc:
-        handle_unexpected(command, as_json=json_mode, exc=exc)
+        handle_unexpected(command, as_json=json_output, exc=exc)
 
 
 @auth_app.command("whoami")
-def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
+def whoami(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     command = "auth whoami"
-    json_mode = _bool_option(json_output)
     try:
         record = CredentialStore().load()
         with managed_client(token=record.token, client_factory=build_client) as client:
@@ -141,8 +132,8 @@ def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
             "token_state": who.get("token_state", "valid"),
             "credential_backend": record.backend,
         }
-        emit_success(command, data, as_json=json_mode, warnings=warnings)
+        emit_success(command, data, as_json=json_output, warnings=warnings)
     except CliError as exc:
-        fail(command, exc, as_json=json_mode)
+        fail(command, exc, as_json=json_output)
     except Exception as exc:
-        handle_unexpected(command, as_json=json_mode, exc=exc)
+        handle_unexpected(command, as_json=json_output, exc=exc)

@@ -59,23 +59,25 @@ class _FakeClient:
 
 
 class _FakeStore:
-    record = None
+    def __init__(self):
+        self.record = None
 
     def save(self, record):
-        _FakeStore.record = record
+        self.record = record
         return "keyring"
 
     def clear(self):
-        _FakeStore.record = None
+        self.record = None
         return None
 
     def load(self):
-        return _FakeStore.record
+        return self.record
 
 
 def _mock_default_mode(monkeypatch):
+    fake_store = _FakeStore()
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
-    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: _FakeStore())
+    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _FakeClient())

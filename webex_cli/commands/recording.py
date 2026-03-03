@@ -5,6 +5,7 @@ from typing import Any
 
 import typer
 
+from webex_cli.client.api import WebexApiClient
 from webex_cli.commands.common import (
     build_client,
     emit_success,
@@ -77,7 +78,7 @@ def _status_from_recording_item(item: dict[str, Any]) -> tuple[RecordingStatus, 
     return status_value, warnings
 
 
-def _resolve_recording(client, meeting_id: str, recording_id: str | None) -> dict[str, Any] | None:
+def _resolve_recording(client: WebexApiClient, meeting_id: str, recording_id: str | None) -> dict[str, Any] | None:
     if recording_id:
         item = client.get_recording(recording_id)
         item_meeting_id = item.get("meetingId") or item.get("meeting_id")

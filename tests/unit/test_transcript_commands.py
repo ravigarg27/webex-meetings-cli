@@ -101,7 +101,29 @@ def test_transcript_download_accepts_text_alias(monkeypatch, capsys) -> None:
         )
         payload = json.loads(capsys.readouterr().out)
         assert payload["data"]["format"] == "txt"
-        assert client.last_format == "txt"
+        assert client.last_format == "text"
+        assert out_path.exists()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_download_txt_alias_uses_text_api_format(monkeypatch, capsys) -> None:
+    client = _TranscriptFormatClient()
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: client)
+    tmp_dir = Path(".test_tmp") / f"transcript-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_dir / "out.txt"
+    try:
+        transcript_commands.download_transcript(
+            meeting_id="m1",
+            format_value="txt",
+            out=str(out_path),
+            overwrite=False,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["data"]["format"] == "txt"
+        assert client.last_format == "text"
         assert out_path.exists()
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

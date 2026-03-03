@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import random
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
@@ -125,30 +126,22 @@ class WebexApiClient:
         except Exception:
             return None
 
-    def _request(
+    def _retry_request(
         self,
-        method: str,
-        path: str,
         *,
-        params: dict[str, Any] | None = None,
-        timeout_seconds: int | None = None,
+        method: str,
+        target_for_log: str,
+        path_for_error: str | None,
+        request_call: Callable[[], httpx.Response],
     ) -> httpx.Response:
-        timeout = timeout_seconds or self.timeout_seconds
         delay = 0.5
         last_error: CliError | None = None
         for attempt in range(self.retry_attempts):
             try:
-                client = self._get_client()
-                logger.debug("request attempt=%s method=%s path=%s", attempt + 1, method, path)
-                response = client.request(
-                    method=method,
-                    url=self._build_url(path),
-                    headers=self._headers(),
-                    params=params,
-                    timeout=timeout,
-                )
+                logger.debug("request attempt=%s method=%s target=%s", attempt + 1, method, target_for_log)
+                response = request_call()
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
-                logger.warning("network error method=%s path=%s attempt=%s", method, path, attempt + 1)
+                logger.warning("network error method=%s target=%s attempt=%s", method, target_for_log, attempt + 1)
                 last_error = CliError(
                     DomainCode.UPSTREAM_UNAVAILABLE,
                     "Network error while calling upstream.",
@@ -156,7 +149,6 @@ class WebexApiClient:
                 )
                 if attempt == self.retry_attempts - 1:
                     raise last_error from exc
-                # Exponential backoff with full jitter.
                 wait = random.uniform(0, min(delay, self.max_delay_seconds))
                 time.sleep(wait)
                 delay *= 2
@@ -164,13 +156,13 @@ class WebexApiClient:
 
             if response.status_code in {429} or response.status_code >= 500:
                 logger.warning(
-                    "transient upstream response method=%s path=%s status=%s attempt=%s",
+                    "transient upstream response method=%s target=%s status=%s attempt=%s",
                     method,
-                    path,
+                    target_for_log,
                     response.status_code,
                     attempt + 1,
                 )
-                last_error = self._map_response_error(response, path=path)
+                last_error = self._map_response_error(response, path=path_for_error)
                 if attempt == self.retry_attempts - 1:
                     raise last_error
                 retry_after_delay = self._retry_after_delay(response)
@@ -183,14 +175,41 @@ class WebexApiClient:
                 continue
 
             if response.is_error:
-                logger.info("non-retryable upstream response method=%s path=%s status=%s", method, path, response.status_code)
-                raise self._map_response_error(response, path=path)
-
+                logger.info(
+                    "non-retryable upstream response method=%s target=%s status=%s",
+                    method,
+                    target_for_log,
+                    response.status_code,
+                )
+                raise self._map_response_error(response, path=path_for_error)
             return response
 
         if last_error:
             raise last_error
         raise CliError(DomainCode.INTERNAL_ERROR, "Retry loop ended unexpectedly.")
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> httpx.Response:
+        timeout = timeout_seconds or self.timeout_seconds
+        url = self._build_url(path)
+        return self._retry_request(
+            method=method,
+            target_for_log=path,
+            path_for_error=path,
+            request_call=lambda: self._get_client().request(
+                method=method,
+                url=url,
+                headers=self._headers(),
+                params=params,
+                timeout=timeout,
+            ),
+        )
 
     def _request_json(
         self,
@@ -221,75 +240,29 @@ class WebexApiClient:
         path_for_error: str,
         include_auth: bool,
     ) -> httpx.Response:
-        delay = 0.5
-        last_error: CliError | None = None
-        for attempt in range(self.retry_attempts):
-            try:
-                client = self._get_client()
-                logger.debug(
-                    "absolute request attempt=%s method=%s url=%s",
-                    attempt + 1,
-                    method,
-                    self._safe_url_for_log(url),
-                )
-                response = client.request(
-                    method=method,
-                    url=url,
-                    headers=self._headers() if include_auth else None,
-                    timeout=timeout_seconds,
-                )
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
-                logger.warning(
-                    "network error method=%s url=%s attempt=%s",
-                    method,
-                    self._safe_url_for_log(url),
-                    attempt + 1,
-                )
-                last_error = CliError(
-                    DomainCode.UPSTREAM_UNAVAILABLE,
-                    "Network error while calling upstream.",
-                    details={"exception": str(exc)},
-                )
-                if attempt == self.retry_attempts - 1:
-                    raise last_error from exc
-                wait = random.uniform(0, min(delay, self.max_delay_seconds))
-                time.sleep(wait)
-                delay *= 2
-                continue
+        safe_url = self._safe_url_for_log(url)
+        return self._retry_request(
+            method=method,
+            target_for_log=safe_url,
+            path_for_error=path_for_error,
+            request_call=lambda: self._get_client().request(
+                method=method,
+                url=url,
+                headers=self._headers() if include_auth else None,
+                timeout=timeout_seconds,
+            ),
+        )
 
-            if response.status_code in {429} or response.status_code >= 500:
-                logger.warning(
-                    "transient upstream absolute response method=%s url=%s status=%s attempt=%s",
-                    method,
-                    self._safe_url_for_log(url),
-                    response.status_code,
-                    attempt + 1,
-                )
-                last_error = self._map_response_error(response, path=path_for_error)
-                if attempt == self.retry_attempts - 1:
-                    raise last_error
-                retry_after_delay = self._retry_after_delay(response)
-                if retry_after_delay is not None:
-                    time.sleep(max(0.0, retry_after_delay))
-                else:
-                    wait = random.uniform(0, min(delay, self.max_delay_seconds))
-                    time.sleep(wait)
-                delay *= 2
-                continue
-
-            if response.is_error:
-                logger.info(
-                    "non-retryable upstream absolute response method=%s url=%s status=%s",
-                    method,
-                    self._safe_url_for_log(url),
-                    response.status_code,
-                )
-                raise self._map_response_error(response, path=path_for_error)
-            return response
-
-        if last_error:
-            raise last_error
-        raise CliError(DomainCode.INTERNAL_ERROR, "Retry loop ended unexpectedly.")
+    @staticmethod
+    def _address_is_private_or_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        return bool(
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        )
 
     @staticmethod
     def _host_is_private_or_local(hostname: str) -> bool:
@@ -299,15 +272,28 @@ class WebexApiClient:
         try:
             addr = ipaddress.ip_address(normalized)
         except ValueError:
+            addr = None
+        if addr is not None:
+            return WebexApiClient._address_is_private_or_local(addr)
+
+        try:
+            resolved = socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM)
+        except socket.gaierror:
             return False
-        return bool(
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        )
+        except OSError:
+            return False
+        for entry in resolved:
+            sockaddr = entry[4]
+            if not sockaddr:
+                continue
+            candidate_ip = sockaddr[0]
+            try:
+                candidate = ipaddress.ip_address(candidate_ip)
+            except ValueError:
+                continue
+            if WebexApiClient._address_is_private_or_local(candidate):
+                return True
+        return False
 
     def _validate_download_url(self, url: str) -> tuple[str, bool]:
         parsed = urlparse(url)
