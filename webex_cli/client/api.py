@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
@@ -36,6 +36,10 @@ class WebexApiClient:
 
     def _build_url(self, path: str) -> str:
         return urljoin(f"{self.base_url.rstrip('/')}/", path.lstrip("/"))
+
+    @staticmethod
+    def _encoded(value: str) -> str:
+        return quote(value, safe="")
 
     def _map_response_error(self, response: httpx.Response) -> CliError:
         status = response.status_code
@@ -197,18 +201,18 @@ class WebexApiClient:
         return self._normalize_page(payload)
 
     def get_meeting(self, meeting_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/meetings/{meeting_id}")
+        return self._request_json("GET", f"/v1/meetings/{self._encoded(meeting_id)}")
 
     def get_meeting_join_url(self, meeting_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/meetings/{meeting_id}")
+        return self._request_json("GET", f"/v1/meetings/{self._encoded(meeting_id)}")
 
     def get_transcript_status(self, meeting_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/meetingTranscripts/{meeting_id}")
+        return self._request_json("GET", f"/v1/meetingTranscripts/{self._encoded(meeting_id)}")
 
     def get_transcript(self, meeting_id: str, format_value: str) -> dict[str, Any]:
         return self._request_json(
             "GET",
-            f"/v1/meetingTranscripts/{meeting_id}",
+            f"/v1/meetingTranscripts/{self._encoded(meeting_id)}",
             params={"format": format_value},
             timeout_seconds=self.download_timeout_seconds,
         )
@@ -232,7 +236,7 @@ class WebexApiClient:
         return self._normalize_page(payload)
 
     def get_recording(self, recording_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/recordings/{recording_id}")
+        return self._request_json("GET", f"/v1/recordings/{self._encoded(recording_id)}")
 
     def download_recording(self, recording_id: str, quality: str) -> tuple[bytes, str]:
         metadata = self.get_recording(recording_id)
@@ -253,4 +257,3 @@ class WebexApiClient:
             raise self._map_response_error(response)
         actual_quality = metadata.get("quality") or quality
         return response.content, str(actual_quality)
-

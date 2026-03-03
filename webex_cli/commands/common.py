@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -90,3 +91,17 @@ def fetch_all_pages(
             break
         token = next_token
     return items, warnings
+
+
+_ID_PATTERN = re.compile(r"^\S+$")
+
+
+def validate_id(value: str, name: str = "id") -> str:
+    candidate = value.strip()
+    if not candidate or not _ID_PATTERN.match(candidate):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"Invalid {name} format.",
+            details={name: value},
+        )
+    return candidate
