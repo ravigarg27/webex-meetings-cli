@@ -1,4 +1,7 @@
 import os
+import shutil
+import uuid
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -70,7 +73,7 @@ def _mock_default_mode(monkeypatch):
     monkeypatch.setattr(recording_commands, "build_client", lambda: _FakeClient())
 
 
-def test_cli_smoke_mocked_mode(monkeypatch, tmp_path) -> None:
+def test_cli_smoke_mocked_mode(monkeypatch) -> None:
     _mock_default_mode(monkeypatch)
     runner = CliRunner()
 
@@ -78,14 +81,19 @@ def test_cli_smoke_mocked_mode(monkeypatch, tmp_path) -> None:
     assert runner.invoke(app, ["auth", "whoami", "--json"]).exit_code == 0
     assert runner.invoke(app, ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"]).exit_code == 0
     assert runner.invoke(app, ["transcript", "get", "m1", "--format", "text", "--json"]).exit_code == 0
-    out_file = tmp_path / "r1.mp4"
-    assert (
-        runner.invoke(
-            app,
-            ["recording", "download", "m1", "--out", str(out_file), "--quality", "best", "--json"],
-        ).exit_code
-        == 0
-    )
+    tmp_dir = Path(".test_tmp") / f"e2e-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_file = tmp_dir / "r1.mp4"
+    try:
+        assert (
+            runner.invoke(
+                app,
+                ["recording", "download", "m1", "--out", str(out_file), "--quality", "best", "--json"],
+            ).exit_code
+            == 0
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @pytest.mark.skipif(
@@ -95,4 +103,3 @@ def test_cli_smoke_mocked_mode(monkeypatch, tmp_path) -> None:
 def test_cli_smoke_live_mode_placeholder() -> None:
     # Live e2e is opt-in. This placeholder keeps CI green when env vars are absent.
     assert True
-

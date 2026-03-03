@@ -1,4 +1,7 @@
 import json
+import shutil
+import uuid
+from pathlib import Path
 
 import pytest
 import typer
@@ -26,19 +29,23 @@ def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     assert exc.value.exit_code == 2
 
 
-def test_recording_download_quality_fallback_warning(monkeypatch, tmp_path, capsys) -> None:
+def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda: _DownloadRecordingClient())
-    target = tmp_path / "out.mp4"
-    recording_commands.download_recording(
-        meeting_id="m1",
-        out=str(target),
-        recording_id=None,
-        quality="best",
-        overwrite=False,
-        json_output=True,
-    )
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["warnings"] == ["QUALITY_FALLBACK"]
-    assert payload["data"]["quality"] == "medium"
-    assert target.exists()
-
+    tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_dir / "out.mp4"
+    try:
+        recording_commands.download_recording(
+            meeting_id="m1",
+            out=str(target),
+            recording_id=None,
+            quality="best",
+            overwrite=False,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["warnings"] == ["QUALITY_FALLBACK"]
+        assert payload["data"]["quality"] == "medium"
+        assert target.exists()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
