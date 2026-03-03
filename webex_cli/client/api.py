@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import ipaddress
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import random
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def _normalize_error_code(response: httpx.Response) -> str | None:
@@ -40,9 +44,18 @@ class WebexApiClient:
     def _build_url(self, path: str) -> str:
         return urljoin(f"{self.base_url.rstrip('/')}/", path.lstrip("/"))
 
+    def _base_hostname(self) -> str | None:
+        return urlparse(self.base_url).hostname
+
     @staticmethod
     def _encoded(value: str) -> str:
         return quote(value, safe="")
+
+    @staticmethod
+    def _safe_url_for_log(url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.hostname or "unknown"
+        return f"{parsed.scheme}://{host}{parsed.path or ''}"
 
     def _map_response_error(self, response: httpx.Response, path: str | None = None) -> CliError:
         status = response.status_code
@@ -52,7 +65,7 @@ class WebexApiClient:
             details["upstream_code"] = code
 
         if status == 401:
-            return CliError(DomainCode.AUTH_INVALID, "Authentication failed.", details=details)
+            return CliError(DomainCode.AUTH_INVALID, "Authentication failed or token expired.", details=details)
         if status == 403 and code in {"FEATURE_DISABLED", "ORG_POLICY_RESTRICTED"}:
             normalized_path = (path or "").lower()
             if "meetingtranscripts" in normalized_path:
@@ -90,7 +103,7 @@ class WebexApiClient:
             details=details,
         )
 
-    def _get_client(self, timeout: int) -> httpx.Client:
+    def _get_client(self) -> httpx.Client:
         # Keep one shared client for connection pooling.
         if self._client is None:
             self._client = httpx.Client()
@@ -125,7 +138,8 @@ class WebexApiClient:
         last_error: CliError | None = None
         for attempt in range(self.retry_attempts):
             try:
-                client = self._get_client(timeout=timeout)
+                client = self._get_client()
+                logger.debug("request attempt=%s method=%s path=%s", attempt + 1, method, path)
                 response = client.request(
                     method=method,
                     url=self._build_url(path),
@@ -134,6 +148,7 @@ class WebexApiClient:
                     timeout=timeout,
                 )
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                logger.warning("network error method=%s path=%s attempt=%s", method, path, attempt + 1)
                 last_error = CliError(
                     DomainCode.UPSTREAM_UNAVAILABLE,
                     "Network error while calling upstream.",
@@ -148,6 +163,13 @@ class WebexApiClient:
                 continue
 
             if response.status_code in {429} or response.status_code >= 500:
+                logger.warning(
+                    "transient upstream response method=%s path=%s status=%s attempt=%s",
+                    method,
+                    path,
+                    response.status_code,
+                    attempt + 1,
+                )
                 last_error = self._map_response_error(response, path=path)
                 if attempt == self.retry_attempts - 1:
                     raise last_error
@@ -161,6 +183,7 @@ class WebexApiClient:
                 continue
 
             if response.is_error:
+                logger.info("non-retryable upstream response method=%s path=%s status=%s", method, path, response.status_code)
                 raise self._map_response_error(response, path=path)
 
             return response
@@ -196,19 +219,32 @@ class WebexApiClient:
         *,
         timeout_seconds: int,
         path_for_error: str,
+        include_auth: bool,
     ) -> httpx.Response:
         delay = 0.5
         last_error: CliError | None = None
         for attempt in range(self.retry_attempts):
             try:
-                client = self._get_client(timeout=timeout_seconds)
+                client = self._get_client()
+                logger.debug(
+                    "absolute request attempt=%s method=%s url=%s",
+                    attempt + 1,
+                    method,
+                    self._safe_url_for_log(url),
+                )
                 response = client.request(
                     method=method,
                     url=url,
-                    headers=self._headers(),
+                    headers=self._headers() if include_auth else None,
                     timeout=timeout_seconds,
                 )
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                logger.warning(
+                    "network error method=%s url=%s attempt=%s",
+                    method,
+                    self._safe_url_for_log(url),
+                    attempt + 1,
+                )
                 last_error = CliError(
                     DomainCode.UPSTREAM_UNAVAILABLE,
                     "Network error while calling upstream.",
@@ -222,6 +258,13 @@ class WebexApiClient:
                 continue
 
             if response.status_code in {429} or response.status_code >= 500:
+                logger.warning(
+                    "transient upstream absolute response method=%s url=%s status=%s attempt=%s",
+                    method,
+                    self._safe_url_for_log(url),
+                    response.status_code,
+                    attempt + 1,
+                )
                 last_error = self._map_response_error(response, path=path_for_error)
                 if attempt == self.retry_attempts - 1:
                     raise last_error
@@ -235,6 +278,12 @@ class WebexApiClient:
                 continue
 
             if response.is_error:
+                logger.info(
+                    "non-retryable upstream absolute response method=%s url=%s status=%s",
+                    method,
+                    self._safe_url_for_log(url),
+                    response.status_code,
+                )
                 raise self._map_response_error(response, path=path_for_error)
             return response
 
@@ -242,14 +291,60 @@ class WebexApiClient:
             raise last_error
         raise CliError(DomainCode.INTERNAL_ERROR, "Retry loop ended unexpectedly.")
 
-    def _request_bytes(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> bytes:
-        response = self._request(
-            method,
-            path,
-            params=params,
-            timeout_seconds=self.download_timeout_seconds,
+    @staticmethod
+    def _host_is_private_or_local(hostname: str) -> bool:
+        normalized = hostname.strip().lower()
+        if normalized in {"localhost"} or normalized.endswith(".localhost"):
+            return True
+        try:
+            addr = ipaddress.ip_address(normalized)
+        except ValueError:
+            return False
+        return bool(
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
         )
-        return response.content
+
+    def _validate_download_url(self, url: str) -> tuple[str, bool]:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if parsed.scheme.lower() != "https":
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Recording download URL must use https.",
+                details={"download_url": url},
+            )
+        if not hostname:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Recording download URL is invalid.",
+                details={"download_url": url},
+            )
+        if self._host_is_private_or_local(hostname):
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Recording download URL points to a blocked local/private host.",
+                details={"download_host": hostname},
+            )
+
+        normalized_host = hostname.lower()
+        base_host = (self._base_hostname() or "").lower()
+        trusted_suffixes = (
+            ".webexapis.com",
+            ".webex.com",
+            ".cisco.com",
+            ".wbx2.com",
+        )
+        trusted_host = (
+            normalized_host == base_host
+            or normalized_host in {"webexapis.com", "webex.com"}
+            or normalized_host.endswith(trusted_suffixes)
+        )
+        return url, trusted_host
 
     def whoami(self) -> dict[str, Any]:
         payload = self._request_json("GET", "/v1/people/me")
@@ -276,7 +371,18 @@ class WebexApiClient:
 
     @staticmethod
     def _normalize_page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+        if not isinstance(payload, dict):
+            raise CliError(DomainCode.UPSTREAM_UNAVAILABLE, "Upstream returned invalid pagination payload type.")
+        found_items_key = any(key in payload for key in ("items", "meetings", "recordings"))
         items = payload.get("items") or payload.get("meetings") or payload.get("recordings") or []
+        if not isinstance(items, list):
+            raise CliError(DomainCode.UPSTREAM_UNAVAILABLE, "Upstream returned non-list items payload.")
+        if not found_items_key and payload:
+            raise CliError(
+                DomainCode.UPSTREAM_UNAVAILABLE,
+                "Upstream pagination payload missing items key.",
+                details={"payload_keys": sorted(payload.keys())[:20]},
+            )
         next_token = payload.get("next_page_token") or payload.get("nextPageToken") or payload.get("next")
         return items, next_token
 
@@ -299,7 +405,7 @@ class WebexApiClient:
         return self._request_json("GET", f"/v1/meetings/{self._encoded(meeting_id)}")
 
     def get_meeting_join_url(self, meeting_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/v1/meetings/{self._encoded(meeting_id)}")
+        return self.get_meeting(meeting_id)
 
     def get_transcript_status(self, meeting_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/v1/meetingTranscripts/{self._encoded(meeting_id)}")
@@ -379,11 +485,13 @@ class WebexApiClient:
                 "Recording download URL not available.",
                 details={"recording_id": recording_id},
             )
+        safe_url, trusted_host = self._validate_download_url(download_url)
         response = self._request_absolute(
             "GET",
-            download_url,
+            safe_url,
             timeout_seconds=self.download_timeout_seconds,
             path_for_error="/v1/recordings/download",
+            include_auth=trusted_host,
         )
         return response.content, str(actual_quality)
 
