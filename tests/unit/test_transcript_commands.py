@@ -28,6 +28,11 @@ class _TranscriptClientWaitNoAccess:
         raise CliError(DomainCode.NO_ACCESS, "forbidden")
 
 
+class _TranscriptClientDisabled:
+    def get_transcript_status(self, meeting_id):
+        raise CliError(DomainCode.TRANSCRIPT_DISABLED, "disabled")
+
+
 def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:
     monkeypatch.setattr(transcript_commands, "build_client", lambda: _TranscriptClientStatusNotFound())
     transcript_commands.status(meeting_id="m1", json_output=True)
@@ -51,3 +56,9 @@ def test_transcript_wait_no_access_exits_5(monkeypatch) -> None:
         transcript_commands.wait_transcript(meeting_id="m1", timeout=10, interval=1, json_output=True)
     assert exc.value.exit_code == 5
 
+
+def test_transcript_status_disabled_mapping(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda: _TranscriptClientDisabled())
+    transcript_commands.status(meeting_id="m1", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["status"] == "transcript_disabled"

@@ -17,6 +17,8 @@ recording_app = typer.Typer(help="Recording commands")
 def _status_from_exception(exc: CliError) -> RecordingStatus | None:
     if exc.code == DomainCode.NOT_FOUND:
         return RecordingStatus.NOT_FOUND
+    if exc.code == DomainCode.RECORDING_DISABLED:
+        return RecordingStatus.RECORDING_DISABLED
     if exc.code == DomainCode.NO_ACCESS:
         upstream_code = (exc.details or {}).get("upstream_code")
         if upstream_code in {"FEATURE_DISABLED", "ORG_POLICY_RESTRICTED"}:
@@ -134,7 +136,13 @@ def status_recording(
             )
             return
         raw_status = item.get("status") or item.get("state")
-        status_value = map_recording_status(raw_status or "ready")
+        if raw_status is None:
+            if item.get("downloadUrl") or item.get("download_url"):
+                status_value = RecordingStatus.READY
+            else:
+                status_value = RecordingStatus.PROCESSING
+        else:
+            status_value = map_recording_status(raw_status)
         emit_success(
             command,
             {

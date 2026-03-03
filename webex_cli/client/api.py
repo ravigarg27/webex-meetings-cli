@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+import random
 from typing import Any
 from urllib.parse import quote, urljoin
 
@@ -30,6 +32,7 @@ class WebexApiClient:
     download_timeout_seconds: int = 300
     retry_attempts: int = 5
     max_delay_seconds: float = 8.0
+    _client: httpx.Client | None = None
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
@@ -41,7 +44,7 @@ class WebexApiClient:
     def _encoded(value: str) -> str:
         return quote(value, safe="")
 
-    def _map_response_error(self, response: httpx.Response) -> CliError:
+    def _map_response_error(self, response: httpx.Response, path: str | None = None) -> CliError:
         status = response.status_code
         details: dict[str, Any] = {"status_code": status}
         code = _normalize_error_code(response)
@@ -51,6 +54,19 @@ class WebexApiClient:
         if status == 401:
             return CliError(DomainCode.AUTH_INVALID, "Authentication failed.", details=details)
         if status == 403 and code in {"FEATURE_DISABLED", "ORG_POLICY_RESTRICTED"}:
+            normalized_path = (path or "").lower()
+            if "meetingtranscripts" in normalized_path:
+                return CliError(
+                    DomainCode.TRANSCRIPT_DISABLED,
+                    "Transcript feature is disabled by policy.",
+                    details=details,
+                )
+            if "/recordings" in normalized_path:
+                return CliError(
+                    DomainCode.RECORDING_DISABLED,
+                    "Recording feature is disabled by policy.",
+                    details=details,
+                )
             return CliError(
                 DomainCode.NO_ACCESS,
                 "Access blocked by org policy.",
@@ -74,6 +90,28 @@ class WebexApiClient:
             details=details,
         )
 
+    def _get_client(self, timeout: int) -> httpx.Client:
+        # Keep one shared client for connection pooling.
+        if self._client is None:
+            self._client = httpx.Client()
+        return self._client
+
+    @staticmethod
+    def _retry_after_delay(response: httpx.Response) -> float | None:
+        retry_after = response.headers.get("Retry-After")
+        if not retry_after:
+            return None
+        if retry_after.isdigit():
+            return float(retry_after)
+        try:
+            dt = parsedate_to_datetime(retry_after)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            seconds = (dt - datetime.now(timezone.utc)).total_seconds()
+            return max(0.0, seconds)
+        except Exception:
+            return None
+
     def _request(
         self,
         method: str,
@@ -87,13 +125,14 @@ class WebexApiClient:
         last_error: CliError | None = None
         for attempt in range(self.retry_attempts):
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    response = client.request(
-                        method=method,
-                        url=self._build_url(path),
-                        headers=self._headers(),
-                        params=params,
-                    )
+                client = self._get_client(timeout=timeout)
+                response = client.request(
+                    method=method,
+                    url=self._build_url(path),
+                    headers=self._headers(),
+                    params=params,
+                    timeout=timeout,
+                )
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
                 last_error = CliError(
                     DomainCode.UPSTREAM_UNAVAILABLE,
@@ -102,24 +141,27 @@ class WebexApiClient:
                 )
                 if attempt == self.retry_attempts - 1:
                     raise last_error from exc
-                time.sleep(min(delay, self.max_delay_seconds))
+                # Exponential backoff with full jitter.
+                wait = random.uniform(0, min(delay, self.max_delay_seconds))
+                time.sleep(wait)
                 delay *= 2
                 continue
 
             if response.status_code in {429} or response.status_code >= 500:
-                last_error = self._map_response_error(response)
+                last_error = self._map_response_error(response, path=path)
                 if attempt == self.retry_attempts - 1:
                     raise last_error
-                retry_after = response.headers.get("Retry-After")
-                if retry_after and retry_after.isdigit():
-                    time.sleep(min(float(retry_after), self.max_delay_seconds))
+                retry_after_delay = self._retry_after_delay(response)
+                if retry_after_delay is not None:
+                    time.sleep(min(retry_after_delay, self.max_delay_seconds))
                 else:
-                    time.sleep(min(delay, self.max_delay_seconds))
-                    delay *= 2
+                    wait = random.uniform(0, min(delay, self.max_delay_seconds))
+                    time.sleep(wait)
+                delay *= 2
                 continue
 
             if response.is_error:
-                raise self._map_response_error(response)
+                raise self._map_response_error(response, path=path)
 
             return response
 
@@ -263,6 +305,11 @@ class WebexApiClient:
         with httpx.Client(timeout=self.download_timeout_seconds) as client:
             response = client.get(download_url, headers=self._headers())
         if response.is_error:
-            raise self._map_response_error(response)
+            raise self._map_response_error(response, path="/v1/recordings/download")
         actual_quality = metadata.get("quality") or quality
         return response.content, str(actual_quality)
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None

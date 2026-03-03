@@ -1,3 +1,5 @@
+import json
+
 from webex_cli.commands import auth as auth_commands
 
 
@@ -23,9 +25,13 @@ class _FakeStore:
 
     def save(self, record):
         self.saved = record
+        return "file_fallback"
 
     def clear(self):
         self.cleared = True
+
+    def load(self):
+        return self.saved
 
 
 def test_login_saves_credentials(monkeypatch) -> None:
@@ -43,3 +49,12 @@ def test_logout_clears_credentials(monkeypatch) -> None:
     auth_commands.logout()
     assert fake_store.cleared is True
 
+
+def test_login_json_emits_warning_for_fallback_backend(monkeypatch, capsys) -> None:
+    fake_store = _FakeStore()
+    monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
+    auth_commands.login(token="token123", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["warnings"] == ["INSECURE_CREDENTIAL_STORE"]

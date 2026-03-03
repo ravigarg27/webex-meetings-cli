@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfoNotFoundError
 from zoneinfo import ZoneInfo
 
 from webex_cli.errors import CliError, DomainCode
@@ -8,17 +9,23 @@ from webex_cli.errors import CliError, DomainCode
 
 def _parse_dt(value: str, tz_name: str | None) -> datetime:
     try:
+        if tz_name:
+            try:
+                tz_candidate = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError as exc:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    f"Invalid timezone: {tz_name}",
+                    details={"timezone": tz_name},
+                ) from exc
+        else:
+            tz_candidate = datetime.now().astimezone().tzinfo or timezone.utc
+
         if "T" not in value:
-            tz = ZoneInfo(tz_name) if tz_name else datetime.now().astimezone().tzinfo
-            if tz is None:
-                tz = timezone.utc
-            return datetime.combine(datetime.fromisoformat(value).date(), time.min, tz)
+            return datetime.combine(datetime.fromisoformat(value).date(), time.min, tz_candidate)
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            tz = ZoneInfo(tz_name) if tz_name else datetime.now().astimezone().tzinfo
-            if tz is None:
-                tz = timezone.utc
-            dt = dt.replace(tzinfo=tz)
+            dt = dt.replace(tzinfo=tz_candidate)
         return dt
     except Exception as exc:
         raise CliError(
@@ -38,4 +45,3 @@ def parse_time_range(from_value: str, to_value: str, tz_name: str | None) -> tup
             details={"from": start.isoformat(), "to": end.isoformat()},
         )
     return start.isoformat(), end.isoformat()
-

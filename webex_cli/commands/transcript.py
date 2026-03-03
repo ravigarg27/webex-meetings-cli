@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ transcript_app = typer.Typer(help="Transcript commands")
 def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
     if exc.code == DomainCode.NOT_FOUND:
         return TranscriptStatus.NOT_FOUND
+    if exc.code == DomainCode.TRANSCRIPT_DISABLED:
+        return TranscriptStatus.TRANSCRIPT_DISABLED
     if exc.code == DomainCode.NO_ACCESS:
         upstream_code = (exc.details or {}).get("upstream_code")
         if upstream_code in {"FEATURE_DISABLED", "ORG_POLICY_RESTRICTED"}:
@@ -49,13 +51,26 @@ def _compact_utc(value: str | None) -> str:
         return "unknown"
 
 
+def _canonical_start_utc(meeting: dict[str, Any]) -> str:
+    raw = meeting.get("start") or meeting.get("startedAt") or meeting.get("started_at")
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return str(raw)
+
+
 def _batch_filename(meeting: dict[str, Any], format_value: str, artifact_id: str | None, download_url: str | None) -> str:
     meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "meeting")
     start_utc = _compact_utc(meeting.get("start") or meeting.get("startedAt") or meeting.get("started_at"))
     if artifact_id:
         suffix = artifact_id
     else:
-        canonical = f"{meeting_id}|{meeting.get('start') or ''}|{download_url or ''}"
+        canonical = f"{meeting_id}|{_canonical_start_utc(meeting)}|{download_url or ''}"
         suffix = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
     stem = sanitize_filename(f"{meeting_id}_{start_utc}_{suffix}")
     return f"{stem}.{format_value}"

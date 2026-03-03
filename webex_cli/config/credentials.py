@@ -21,6 +21,7 @@ class CredentialRecord:
     primary_email: str | None = None
     org_id: str | None = None
     site_url: str | None = None
+    backend: str | None = None
 
 
 class CredentialStore:
@@ -72,12 +73,14 @@ class CredentialStore:
             return None
         return item.get("token")
 
-    def save(self, record: CredentialRecord) -> None:
+    def save(self, record: CredentialRecord) -> str:
+        backend = "file_fallback"
         if self._keyring_available():
             try:
                 import keyring
 
                 keyring.set_password(SERVICE_NAME, self.profile, record.token)
+                backend = "keyring"
             except Exception:
                 self._save_fallback(record.token)
         else:
@@ -89,8 +92,10 @@ class CredentialStore:
                 "primary_email": record.primary_email,
                 "org_id": record.org_id,
                 "site_url": record.site_url,
+                "credential_backend": backend,
             }
         )
+        return backend
 
     def load(self) -> CredentialRecord:
         token: str | None = None
@@ -115,6 +120,7 @@ class CredentialStore:
             primary_email=metadata.get("primary_email"),
             org_id=metadata.get("org_id"),
             site_url=metadata.get("site_url"),
+            backend=metadata.get("credential_backend"),
         )
 
     def clear(self) -> None:
@@ -134,4 +140,3 @@ class CredentialStore:
         metadata = self._metadata_path()
         if metadata.exists():
             metadata.unlink()
-

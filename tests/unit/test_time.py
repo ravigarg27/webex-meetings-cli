@@ -15,3 +15,8 @@ def test_parse_time_range_rejects_reverse_range() -> None:
         parse_time_range("2026-01-02", "2026-01-01", "UTC")
     assert exc.value.code == DomainCode.VALIDATION_ERROR
 
+
+def test_parse_time_range_rejects_invalid_timezone() -> None:
+    with pytest.raises(CliError) as exc:
+        parse_time_range("2026-01-01", "2026-01-02", "Not/AZone")
+    assert exc.value.code == DomainCode.VALIDATION_ERROR

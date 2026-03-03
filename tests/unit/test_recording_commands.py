@@ -22,6 +22,11 @@ class _DownloadRecordingClient:
         return (b"abc", "medium")
 
 
+class _RecordingStatusNoFieldClient:
+    def list_recordings_for_meeting(self, meeting_id):
+        return [{"id": "r1"}]
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -49,3 +54,10 @@ def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> Non
         assert target.exists()
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_recording_status_without_status_defaults_processing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda: _RecordingStatusNoFieldClient())
+    recording_commands.status_recording(meeting_id="m1", recording_id=None, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["status"] == "processing"

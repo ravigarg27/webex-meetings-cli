@@ -13,7 +13,12 @@ def test_client_retries_on_429(monkeypatch) -> None:
         httpx.Response(200, request=request, json={"id": "u1", "displayName": "User", "emails": ["u@example.test"]}),
     ]
 
-    def fake_request(self, method, url, headers=None, params=None):
+    seen_auth = []
+    seen_params = []
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        seen_auth.append((headers or {}).get("Authorization"))
+        seen_params.append(params)
         return responses.pop(0)
 
     monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
@@ -21,12 +26,15 @@ def test_client_retries_on_429(monkeypatch) -> None:
     data = client.whoami()
     assert data["user_id"] == "u1"
     assert len(responses) == 0
+    assert seen_auth[0] == "Bearer token"
+    assert seen_params[0] is None
 
 
 def test_client_maps_403_to_no_access(monkeypatch) -> None:
     request = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
 
-    def fake_request(self, method, url, headers=None, params=None):
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        assert headers["Authorization"] == "Bearer token"
         return httpx.Response(403, request=request, json={"code": "FORBIDDEN"})
 
     monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
@@ -39,7 +47,10 @@ def test_client_maps_403_to_no_access(monkeypatch) -> None:
 def test_client_meeting_page_shape(monkeypatch) -> None:
     request = httpx.Request("GET", "https://webexapis.com/v1/meetings")
 
-    def fake_request(self, method, url, headers=None, params=None):
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        assert headers["Authorization"] == "Bearer token"
+        assert params["participant"] == "me"
+        assert params["max"] == 50
         return httpx.Response(200, request=request, json={"items": [{"id": "m1"}], "nextPageToken": "abc"})
 
     monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
@@ -54,3 +65,15 @@ def test_client_meeting_page_shape(monkeypatch) -> None:
     assert items == [{"id": "m1"}]
     assert token == "abc"
 
+
+def test_client_maps_transcript_disabled(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/meetingTranscripts/m1")
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        return httpx.Response(403, request=request, json={"code": "FEATURE_DISABLED"})
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    with pytest.raises(CliError) as exc:
+        client.get_transcript_status("m1")
+    assert exc.value.code == DomainCode.TRANSCRIPT_DISABLED

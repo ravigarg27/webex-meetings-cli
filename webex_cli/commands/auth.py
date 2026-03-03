@@ -10,7 +10,10 @@ auth_app = typer.Typer(help="Authentication commands")
 
 
 @auth_app.command("login")
-def login(token: str = typer.Option(..., "--token", help="Webex token")) -> None:
+def login(
+    token: str = typer.Option(..., "--token", help="Webex token"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
     command = "auth login"
     try:
         client = build_client(token=token)
@@ -26,7 +29,7 @@ def login(token: str = typer.Option(..., "--token", help="Webex token")) -> None
                 ) from exc
             raise
         store = CredentialStore()
-        store.save(
+        backend = store.save(
             CredentialRecord(
                 token=token,
                 user_id=who.get("user_id"),
@@ -34,8 +37,12 @@ def login(token: str = typer.Option(..., "--token", help="Webex token")) -> None
                 primary_email=who.get("primary_email"),
                 org_id=who.get("org_id"),
                 site_url=who.get("site_url"),
+                backend=None,
             )
         )
+        warnings: list[str] = []
+        if backend == "file_fallback":
+            warnings.append("INSECURE_CREDENTIAL_STORE")
         emit_success(
             command,
             {
@@ -45,33 +52,39 @@ def login(token: str = typer.Option(..., "--token", help="Webex token")) -> None
                 "org_id": who.get("org_id"),
                 "site_url": who.get("site_url"),
                 "token_state": "valid",
+                "credential_backend": backend,
             },
-            as_json=False,
+            as_json=json_output,
+            warnings=warnings,
         )
     except CliError as exc:
-        fail(command, exc, as_json=False)
+        fail(command, exc, as_json=json_output)
     except Exception as exc:
-        handle_unexpected(command, as_json=False, exc=exc)
+        handle_unexpected(command, as_json=json_output, exc=exc)
 
 
 @auth_app.command("logout")
-def logout() -> None:
+def logout(json_output: bool = typer.Option(False, "--json")) -> None:
     command = "auth logout"
     try:
         CredentialStore().clear()
-        emit_success(command, {"status": "logged_out"}, as_json=False)
+        emit_success(command, {"status": "logged_out"}, as_json=json_output)
     except CliError as exc:
-        fail(command, exc, as_json=False)
+        fail(command, exc, as_json=json_output)
     except Exception as exc:
-        handle_unexpected(command, as_json=False, exc=exc)
+        handle_unexpected(command, as_json=json_output, exc=exc)
 
 
 @auth_app.command("whoami")
 def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
     command = "auth whoami"
     try:
-        client = build_client()
+        record = CredentialStore().load()
+        client = build_client(token=record.token)
         who = client.whoami()
+        warnings: list[str] = []
+        if record.backend == "file_fallback":
+            warnings.append("INSECURE_CREDENTIAL_STORE")
         data = {
             "user_id": who.get("user_id"),
             "display_name": who.get("display_name"),
@@ -79,8 +92,9 @@ def whoami(json_output: bool = typer.Option(False, "--json")) -> None:
             "org_id": who.get("org_id"),
             "site_url": who.get("site_url"),
             "token_state": who.get("token_state", "valid"),
+            "credential_backend": record.backend,
         }
-        emit_success(command, data, as_json=json_output)
+        emit_success(command, data, as_json=json_output, warnings=warnings)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:

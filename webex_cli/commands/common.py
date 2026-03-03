@@ -35,7 +35,7 @@ def handle_unexpected(command: str, as_json: bool, exc: Exception) -> None:
         CliError(
             DomainCode.INTERNAL_ERROR,
             "Unexpected internal error.",
-            details={"exception": str(exc)},
+            details={"error_type": type(exc).__name__},
         ),
         as_json,
     )
@@ -82,11 +82,14 @@ def fetch_all_pages(
         page_items, next_token = fetch_page(token)
         items.extend(page_items)
         if len(items) > max_items or (len(items) >= max_items and bool(next_token)):
+            warnings.append("MAX_ITEMS_GUARD_HIT")
             raise CliError(
                 DomainCode.UPSTREAM_UNAVAILABLE,
                 "Result set exceeded max item guard.",
-                details={"max_items": max_items, "warnings": ["MAX_ITEMS_GUARD_HIT"]},
+                details={"max_items": max_items, "warnings": warnings},
             )
+        if len(items) == max_items and not next_token:
+            warnings.append("MAX_ITEMS_GUARD_HIT")
         if not next_token:
             break
         token = next_token

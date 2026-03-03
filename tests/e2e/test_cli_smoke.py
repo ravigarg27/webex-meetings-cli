@@ -58,11 +58,18 @@ class _FakeClient:
 
 
 class _FakeStore:
+    record = None
+
     def save(self, record):
-        return None
+        _FakeStore.record = record
+        return "keyring"
 
     def clear(self):
+        _FakeStore.record = None
         return None
+
+    def load(self):
+        return _FakeStore.record
 
 
 def _mock_default_mode(monkeypatch):
@@ -97,9 +104,45 @@ def test_cli_smoke_mocked_mode(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("WEBEX_E2E_LIVE") != "1" or not os.environ.get("WEBEX_TEST_TOKEN"),
-    reason="Live e2e requires WEBEX_E2E_LIVE=1 and WEBEX_TEST_TOKEN",
+    os.environ.get("WEBEX_E2E_LIVE") != "1"
+    or not os.environ.get("WEBEX_TEST_TOKEN")
+    or not os.environ.get("WEBEX_TEST_FROM")
+    or not os.environ.get("WEBEX_TEST_TO"),
+    reason="Live e2e requires WEBEX_E2E_LIVE=1, WEBEX_TEST_TOKEN, WEBEX_TEST_FROM, WEBEX_TEST_TO",
 )
-def test_cli_smoke_live_mode_placeholder() -> None:
-    # Live e2e is opt-in. This placeholder keeps CI green when env vars are absent.
-    assert True
+def test_cli_smoke_live_mode() -> None:
+    runner = CliRunner()
+    token = os.environ["WEBEX_TEST_TOKEN"]
+    date_from = os.environ["WEBEX_TEST_FROM"]
+    date_to = os.environ["WEBEX_TEST_TO"]
+
+    tmp_dir = Path(".test_tmp") / f"e2e-live-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    old_appdata = os.environ.get("APPDATA")
+    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    try:
+        # Isolate credential writes from developer machine state.
+        os.environ["APPDATA"] = str(tmp_dir)
+        os.environ["XDG_CONFIG_HOME"] = str(tmp_dir)
+
+        login = runner.invoke(app, ["auth", "login", "--token", token, "--json"])
+        assert login.exit_code == 0, login.stdout
+        whoami = runner.invoke(app, ["auth", "whoami", "--json"])
+        assert whoami.exit_code == 0, whoami.stdout
+        meeting_list = runner.invoke(
+            app,
+            ["meeting", "list", "--from", date_from, "--to", date_to, "--json"],
+        )
+        assert meeting_list.exit_code == 0, meeting_list.stdout
+        logout = runner.invoke(app, ["auth", "logout", "--json"])
+        assert logout.exit_code == 0, logout.stdout
+    finally:
+        if old_appdata is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_appdata
+        if old_xdg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = old_xdg
+        shutil.rmtree(tmp_dir, ignore_errors=True)
