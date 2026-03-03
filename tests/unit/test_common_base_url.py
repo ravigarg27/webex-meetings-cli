@@ -17,6 +17,25 @@ def test_resolve_base_url_rejects_non_https(monkeypatch) -> None:
     assert exc.value.code == DomainCode.VALIDATION_ERROR
 
 
+def test_resolve_base_url_blocks_untrusted_config_host(monkeypatch) -> None:
+    monkeypatch.delenv("WEBEX_API_BASE_URL", raising=False)
+    monkeypatch.delenv("WEBEX_ALLOW_CUSTOM_API_BASE_URL", raising=False)
+
+    class _Settings:
+        api_base_url = "https://evil.example.test"
+        default_tz = None
+
+    monkeypatch.setattr(common_commands, "load_settings", lambda: _Settings())
+    with pytest.raises(CliError) as exc:
+        resolve_base_url()
+    assert exc.value.code == DomainCode.VALIDATION_ERROR
+
+
+def test_resolve_base_url_allows_untrusted_host_via_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("WEBEX_API_BASE_URL", "https://evil.example.test")
+    assert resolve_base_url() == "https://evil.example.test"
+
+
 def test_resolve_effective_timezone_prefers_cli_tz(monkeypatch) -> None:
     class _Settings:
         default_tz = "America/New_York"

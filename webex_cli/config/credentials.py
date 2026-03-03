@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from webex_cli.config.paths import config_dir, fallback_credentials_path
@@ -43,7 +45,7 @@ class CredentialStore:
         cfg = config_dir()
         cfg.mkdir(parents=True, exist_ok=True)
         path = self._metadata_path()
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._write_json(path, data)
 
     def _load_metadata(self) -> dict[str, Any]:
         path = self._metadata_path()
@@ -64,10 +66,18 @@ class CredentialStore:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 payload = {}
-        payload[self.profile] = {"token": token}
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        if os.name != "nt":
-            os.chmod(path, 0o600)
+        if os.name == "nt":
+            try:
+                encrypted = self._dpapi_encrypt(token.encode("utf-8"))
+            except Exception as exc:
+                raise CliError(
+                    DomainCode.INTERNAL_ERROR,
+                    "Unable to securely store token in Windows fallback store.",
+                ) from exc
+            payload[self.profile] = {"token_dpapi": base64.b64encode(encrypted).decode("ascii")}
+        else:
+            payload[self.profile] = {"token": token}
+        self._write_json(path, payload)
 
     def _load_fallback(self) -> str | None:
         path = fallback_credentials_path()
@@ -80,6 +90,12 @@ class CredentialStore:
         item = payload.get(self.profile)
         if not item:
             return None
+        if isinstance(item, dict) and item.get("token_dpapi") and os.name == "nt":
+            try:
+                encrypted = base64.b64decode(str(item["token_dpapi"]))
+                return self._dpapi_decrypt(encrypted).decode("utf-8")
+            except Exception:
+                return None
         return item.get("token")
 
     def save(self, record: CredentialRecord) -> str:
@@ -96,11 +112,6 @@ class CredentialStore:
             self._save_fallback(record.token)
         self._save_metadata(
             {
-                "user_id": record.user_id,
-                "display_name": record.display_name,
-                "primary_email": record.primary_email,
-                "org_id": record.org_id,
-                "site_url": record.site_url,
                 "credential_backend": backend,
             }
         )
@@ -148,7 +159,62 @@ class CredentialStore:
                 payload = {}
             if self.profile in payload:
                 payload.pop(self.profile)
-                path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                self._write_json(path, payload)
         metadata = self._metadata_path()
         if metadata.exists():
             metadata.unlink()
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        text = json.dumps(payload, indent=2)
+        fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            Path(tmp_path).replace(path)
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+        finally:
+            tmp = Path(tmp_path)
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _dpapi_encrypt(data: bytes) -> bytes:
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        in_buffer = ctypes.create_string_buffer(data)
+        in_blob = DATA_BLOB(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+        out_blob = DATA_BLOB()
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        if crypt32.CryptProtectData(ctypes.byref(in_blob), "webex-cli", None, None, None, 0, ctypes.byref(out_blob)) == 0:
+            raise OSError("CryptProtectData failed")
+        try:
+            return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            kernel32.LocalFree(out_blob.pbData)
+
+    @staticmethod
+    def _dpapi_decrypt(data: bytes) -> bytes:
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        in_buffer = ctypes.create_string_buffer(data)
+        in_blob = DATA_BLOB(len(data), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+        out_blob = DATA_BLOB()
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        if crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)) == 0:
+            raise OSError("CryptUnprotectData failed")
+        try:
+            return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            kernel32.LocalFree(out_blob.pbData)

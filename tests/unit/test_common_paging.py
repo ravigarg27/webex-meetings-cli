@@ -23,6 +23,6 @@ def test_fetch_all_pages_raises_when_cap_exceeded() -> None:
 
     with pytest.raises(CliError) as exc:
         fetch_all_pages(fetch_page, max_items=2)
-    assert exc.value.code == DomainCode.UPSTREAM_UNAVAILABLE
+    assert exc.value.code == DomainCode.RESULT_SET_TOO_LARGE
     assert "MAX_ITEMS_GUARD_HIT" in exc.value.details.get("warnings", [])
-
+    assert exc.value.details.get("resume_page_token") == "n1"

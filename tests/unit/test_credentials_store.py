@@ -44,6 +44,8 @@ def test_save_recovers_from_corrupt_fallback_file(monkeypatch) -> None:
 
         assert backend == "file_fallback"
         payload = json.loads(path.read_text(encoding="utf-8"))
-        assert payload["default"]["token"] == "token123"
+        item = payload["default"]
+        assert "token" in item or "token_dpapi" in item
+        assert store.load().token == "token123"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

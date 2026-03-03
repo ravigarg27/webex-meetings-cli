@@ -4,6 +4,7 @@ from webex_cli.errors.codes import DomainCode
 
 EXIT_CODE_MAP: dict[DomainCode, int] = {
     DomainCode.VALIDATION_ERROR: 2,
+    DomainCode.RESULT_SET_TOO_LARGE: 2,
     DomainCode.AUTH_REQUIRED: 3,
     DomainCode.AUTH_INVALID: 3,
     DomainCode.NOT_FOUND: 4,
@@ -21,6 +22,7 @@ EXIT_CODE_MAP: dict[DomainCode, int] = {
 
 RETRYABLE_MAP: dict[DomainCode, bool] = {
     DomainCode.VALIDATION_ERROR: False,
+    DomainCode.RESULT_SET_TOO_LARGE: False,
     DomainCode.AUTH_REQUIRED: False,
     DomainCode.AUTH_INVALID: False,
     DomainCode.NOT_FOUND: False,

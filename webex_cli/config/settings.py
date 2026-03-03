@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from webex_cli.config.paths import config_dir, settings_path
+from webex_cli.errors import CliError, DomainCode
 
 
 @dataclass
@@ -16,10 +18,37 @@ def load_settings() -> Settings:
     path = settings_path()
     if not path.exists():
         return Settings()
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "Config file is invalid JSON.",
+            details={"path": str(path)},
+        ) from exc
+    if not isinstance(data, dict):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "Config file must be a JSON object.",
+            details={"path": str(path)},
+        )
+    api_base_url = data.get("api_base_url", "https://webexapis.com")
+    default_tz = data.get("default_tz")
+    if not isinstance(api_base_url, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`api_base_url` must be a string.",
+            details={"path": str(path)},
+        )
+    if default_tz is not None and not isinstance(default_tz, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`default_tz` must be a string when set.",
+            details={"path": str(path)},
+        )
     return Settings(
-        api_base_url=data.get("api_base_url", "https://webexapis.com"),
-        default_tz=data.get("default_tz"),
+        api_base_url=api_base_url,
+        default_tz=default_tz,
     )
 
 

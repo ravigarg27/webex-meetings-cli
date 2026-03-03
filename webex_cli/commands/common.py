@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import inspect
 import os
 import re
 from typing import Any, Callable, Iterator
@@ -47,7 +46,9 @@ def handle_unexpected(command: str, as_json: bool, exc: Exception) -> None:
 
 def resolve_base_url() -> str:
     settings = load_settings()
-    base_url = os.environ.get("WEBEX_API_BASE_URL") or settings.api_base_url
+    env_base_url = os.environ.get("WEBEX_API_BASE_URL")
+    base_url = env_base_url or settings.api_base_url
+    from_env = env_base_url is not None
     parsed = urlparse(base_url)
     if parsed.scheme.lower() != "https":
         raise CliError(
@@ -59,6 +60,14 @@ def resolve_base_url() -> str:
         raise CliError(
             DomainCode.VALIDATION_ERROR,
             "API base URL is invalid.",
+            details={"api_base_url": base_url},
+        )
+    hostname = (parsed.hostname or "").lower()
+    trusted = hostname == "webexapis.com" or hostname.endswith(".webexapis.com")
+    if not trusted and not from_env and os.environ.get("WEBEX_ALLOW_CUSTOM_API_BASE_URL") != "1":
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "Untrusted API base URL from config is blocked. Use WEBEX_API_BASE_URL or set WEBEX_ALLOW_CUSTOM_API_BASE_URL=1.",
             details={"api_base_url": base_url},
         )
     return base_url.rstrip("/")
@@ -87,19 +96,7 @@ def managed_client(
     client_factory: Callable[[str | None], WebexApiClient] | None = None,
 ) -> Iterator[WebexApiClient]:
     factory = client_factory or build_client
-    if token is None:
-        signature: inspect.Signature | None = None
-        try:
-            signature = inspect.signature(factory)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is not None and len(signature.parameters) == 0:
-            # Some tests monkeypatch a zero-arg factory; support both forms.
-            client = factory()
-        else:
-            client = factory(token)
-    else:
-        client = factory(token)
+    client = factory(token)
     try:
         yield client
     finally:
@@ -123,9 +120,13 @@ def fetch_all_pages(
         if len(items) > max_items or (len(items) >= max_items and bool(next_token)):
             warnings.append("MAX_ITEMS_GUARD_HIT")
             raise CliError(
-                DomainCode.UPSTREAM_UNAVAILABLE,
+                DomainCode.RESULT_SET_TOO_LARGE,
                 "Result set exceeded max item guard.",
-                details={"max_items": max_items, "warnings": warnings},
+                details={
+                    "max_items": max_items,
+                    "warnings": warnings,
+                    "resume_page_token": next_token,
+                },
             )
         if len(items) == max_items and not next_token:
             warnings.append("MAX_ITEMS_GUARD_HIT")
