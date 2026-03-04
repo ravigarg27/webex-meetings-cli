@@ -46,6 +46,12 @@ Legacy insecure token-arg mode (explicit opt-in):
 WEBEX_ALLOW_INSECURE_TOKEN_ARG=1 webex auth login --token "<token>"
 ```
 
+OAuth device flow login:
+
+```bash
+webex auth login --oauth-device-flow --oauth-client-id "<client_id>"
+```
+
 Check identity:
 
 ```bash
@@ -70,18 +76,34 @@ Download a recording:
 webex recording download <meeting_id> --out ./recording.mp4
 ```
 
+Use profiles:
+
+```bash
+webex profile create work --default-tz America/New_York
+webex profile use work
+webex auth whoami --profile work --json
+```
+
 ## Commands
 
 - `webex auth login|logout|whoami`
+- `webex profile create|list|show|use|delete`
 - `webex meeting list|get|join-url`
 - `webex transcript status|get|wait|download|batch`
 - `webex recording list|status|download`
+
+Global options:
+
+- `--profile` profile override (`--profile` > `WEBEX_PROFILE` > active profile)
+- `--request-id` correlation ID for logs/JSON metadata
+- `--log-format text|json` structured diagnostic logs
 
 ## Output Modes
 
 - Default mode is human-readable output.
 - Use `--json` for stable machine-readable envelopes:
   - `ok`, `command`, `data`, `warnings`, `error`, `meta`
+  - `meta` includes `request_id`, `timestamp`, `cli_version`, `schema_version`, `duration_ms`
 
 ## Exit Codes
 
@@ -99,7 +121,11 @@ webex recording download <meeting_id> --out ./recording.mp4
 
 - Prefer `WEBEX_TOKEN` or `--token-stdin`; `--token` is blocked by default.
 - Fallback credential storage is used only if keyring is unavailable.
+- Default fallback policy is `ci_strict`: CI runs must use keyring unless `WEBEX_CREDENTIAL_FALLBACK_POLICY=allow_file_fallback`.
 - Recording download URLs are validated and local/private hosts are blocked.
+- Optional checksum verification:
+  - `webex recording download ... --verify-checksum`
+  - `webex transcript download ... --verify-checksum`
 
 ## Live E2E
 

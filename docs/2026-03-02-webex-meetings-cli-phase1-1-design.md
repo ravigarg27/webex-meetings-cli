@@ -1,7 +1,7 @@
 # Webex Meetings CLI Phase 1.1 Design
 
 Date: 2026-03-02  
-Status: Proposed  
+Status: Implemented  
 Owner: Engineering + Product  
 Depends on: `docs/2026-03-02-webex-meetings-cli-phase1-implementation-spec.md`
 
@@ -25,7 +25,7 @@ Objectives:
    - Better auth diagnostics (`expired`, `revoked`, `insufficient_scope`).
 2. Profile management baseline:
    - Multiple local profiles.
-   - `webex profile list|use|show`.
+   - `webex profile create|list|show|use|delete`.
 3. Output and schema hardening:
    - Versioned JSON schema (`meta.schema_version`).
    - Strict compatibility tests for envelope.
@@ -52,8 +52,10 @@ Objectives:
 ### 3.1 New command group: profile
 
 1. `webex profile list [--json]`
+2. `webex profile create <profileName> [--default-tz <iana_tz>] [--site-url <https_url>] [--json]`
 2. `webex profile use <profileName> [--json]`
-3. `webex profile show [--json]`
+3. `webex profile show [<profileName>] [--json]`
+4. `webex profile delete <profileName> [--json]`
 
 Behavior:
 
@@ -63,8 +65,8 @@ Behavior:
 
 ### 3.2 Auth enhancements
 
-1. `webex auth login [--token <token>] [--device-flow] [--profile <name>] [--non-interactive]`
-2. `--non-interactive` forbids device-flow prompts.
+1. `webex auth login [--token <token>] [--oauth-device-flow] [--profile <name>] [--non-interactive]`
+2. `--non-interactive` forbids OAuth device-flow prompts.
 3. Clear error guidance for scope mismatch.
 
 ## 4. Data Model Changes

@@ -1,7 +1,7 @@
 # Webex Meetings CLI Roadmap
 
 Date: 2026-03-02  
-Status: Draft roadmap  
+Status: Active roadmap (Phase 1.1 completed)  
 Owner: Product + Engineering
 
 ## 1. Roadmap Principles
@@ -30,14 +30,15 @@ Success metrics:
 1. >95% happy-path command success in smoke suite.
 2. Stable command/JSON contracts.
 
-## Phase 1.1 (Hardening + Operability)
+## Phase 1.1 (Hardening + Operability) - Completed
 
 Theme: reliability, security, and multi-profile foundation.
 
 Planned outcomes:
 
 1. Multi-profile support (`profile list/use/show`).
-2. Auth improvements (device flow option, expiry/refresh diagnostics).
+2. Multi-profile lifecycle (`profile create|list|show|use|delete`).
+3. Auth improvements (OAuth device flow, expiry/refresh diagnostics).
 3. Batch concurrency controls.
 4. Schema versioning and compatibility tests.
 5. Structured logging and improved observability.

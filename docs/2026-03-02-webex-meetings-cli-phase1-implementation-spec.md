@@ -149,7 +149,7 @@ Normalization contract:
     "request_id": "optional-correlation-id",
     "timestamp": "2026-03-02T00:00:00Z",
     "cli_version": "1.0.0",
-    "schema_version": "1.0"
+    "schema_version": "1.1"
   }
 }
 ```
@@ -172,7 +172,7 @@ Failure envelope:
     "request_id": "optional-correlation-id",
     "timestamp": "2026-03-02T00:00:00Z",
     "cli_version": "1.0.0",
-    "schema_version": "1.0"
+    "schema_version": "1.1"
   }
 }
 ```
