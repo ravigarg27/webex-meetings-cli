@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import hashlib
 import json
 import time
@@ -17,6 +18,7 @@ from webex_cli.commands.common import (
     fetch_all_pages,
     handle_unexpected,
     managed_client,
+    profile_scope,
     resolve_effective_timezone,
     validate_id,
 )
@@ -26,6 +28,9 @@ from webex_cli.utils.files import atomic_write_bytes, sanitize_filename
 from webex_cli.utils.time import parse_time_range
 
 transcript_app = typer.Typer(help="Download and monitor Webex meeting transcripts.")
+DEFAULT_BATCH_CONCURRENCY = 4
+MIN_BATCH_CONCURRENCY = 1
+MAX_BATCH_CONCURRENCY = 16
 
 
 def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
@@ -157,27 +162,126 @@ def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
     return str(transcript_id)
 
 
+def _process_batch_item(
+    meeting: dict[str, Any],
+    *,
+    api_format: str,
+    output_format: str,
+    target_dir: Path,
+) -> tuple[dict[str, Any], CliError | None]:
+    meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
+    if not meeting_id:
+        return (
+            {
+                "meeting_id": None,
+                "status": "skipped",
+                "output_path": None,
+                "error_code": "NOT_FOUND",
+                "error_message": "Meeting missing id.",
+            },
+            None,
+        )
+    try:
+        with managed_client(client_factory=build_client) as worker_client:
+            status_value, _, _ = _read_transcript_status(worker_client, meeting_id)
+            if status_value != TranscriptStatus.READY:
+                if status_value == TranscriptStatus.FAILED:
+                    terminal_error = CliError(
+                        DomainCode.INTERNAL_ERROR,
+                        "Transcript processing failed.",
+                        details={"meeting_id": meeting_id},
+                    )
+                    return (
+                        {
+                            "meeting_id": meeting_id,
+                            "status": "failed",
+                            "output_path": None,
+                            "error_code": terminal_error.code.value,
+                            "error_message": terminal_error.message,
+                        },
+                        terminal_error,
+                    )
+                return (
+                    {
+                        "meeting_id": meeting_id,
+                        "status": "skipped",
+                        "output_path": None,
+                        "error_code": None,
+                        "error_message": f"Transcript status is {status_value.value}.",
+                    },
+                    None,
+                )
+
+            transcript_id = _resolve_transcript_id(worker_client, meeting_id)
+            content = worker_client.download_transcript(transcript_id, api_format)
+            filename = _batch_filename(meeting, output_format, artifact_id=transcript_id, download_url=None)
+            out_path = target_dir / filename
+            atomic_write_bytes(out_path, content, overwrite=False)
+            return (
+                {
+                    "meeting_id": meeting_id,
+                    "status": "success",
+                    "output_path": str(out_path),
+                    "error_code": None,
+                    "error_message": None,
+                },
+                None,
+            )
+    except CliError as exc:
+        if exc.code == DomainCode.OVERWRITE_CONFLICT:
+            return (
+                {
+                    "meeting_id": meeting_id,
+                    "status": "skipped",
+                    "output_path": None,
+                    "error_code": exc.code.value,
+                    "error_message": exc.message,
+                },
+                None,
+            )
+        return (
+            {
+                "meeting_id": meeting_id,
+                "status": "failed",
+                "output_path": None,
+                "error_code": exc.code.value,
+                "error_message": exc.message,
+            },
+            exc,
+        )
+
+
 @transcript_app.command("status", help="Check whether a transcript is available for a meeting.")
 def status(
     meeting_id: str,
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript status"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        with managed_client(client_factory=build_client) as client:
-            transcript_status, payload, warnings = _read_transcript_status(client, meeting_id)
-        emit_success(
-            command,
-            {
-                "meeting_id": meeting_id,
-                "status": transcript_status.value,
-                "updated_at": payload.get("updatedAt") or payload.get("updated_at"),
-                "reason": payload.get("reason") or payload.get("message"),
-            },
-            as_json=json_output,
-            warnings=warnings,
-        )
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            with managed_client(client_factory=build_client) as client:
+                transcript_status, payload, warnings = _read_transcript_status(client, meeting_id)
+            emit_success(
+                command,
+                {
+                    "meeting_id": meeting_id,
+                    "status": transcript_status.value,
+                    "updated_at": payload.get("updatedAt") or payload.get("updated_at"),
+                    "reason": payload.get("reason") or payload.get("message"),
+                },
+                as_json=json_output,
+                warnings=warnings,
+            )
+    except typer.Exit:
+        raise
+    except typer.Exit:
+        raise
+    except typer.Exit:
+        raise
+    except typer.Exit:
+        raise
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -188,26 +292,28 @@ def status(
 def get_transcript(
     meeting_id: str,
     format_value: str = typer.Option("text", "--format", help="Output format: text/txt (default) or json."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript get"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        format_value = _normalize_get_format(format_value)
-        with managed_client(client_factory=build_client) as client:
-            transcript_id = _resolve_transcript_id(client, meeting_id)
-            content_bytes = client.download_transcript(transcript_id, format_value)
-        content = content_bytes.decode("utf-8")
-        if format_value == "json":
-            try:
-                content = json.loads(content)
-            except json.JSONDecodeError:
-                pass
-        emit_success(
-            command,
-            {"meeting_id": meeting_id, "format": format_value, "content": content},
-            as_json=json_output,
-        )
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            format_value = _normalize_get_format(format_value)
+            with managed_client(client_factory=build_client) as client:
+                transcript_id = _resolve_transcript_id(client, meeting_id)
+                content_bytes = client.download_transcript(transcript_id, format_value)
+            content = content_bytes.decode("utf-8")
+            if format_value == "json":
+                try:
+                    content = json.loads(content)
+                except json.JSONDecodeError:
+                    pass
+            emit_success(
+                command,
+                {"meeting_id": meeting_id, "format": format_value, "content": content},
+                as_json=json_output,
+            )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -219,62 +325,64 @@ def wait_transcript(
     meeting_id: str,
     timeout: int = typer.Option(600, "--timeout", help="Maximum seconds to wait before giving up. Default: 600."),
     interval: int = typer.Option(10, "--interval", help="Seconds between status checks. Default: 10."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript wait"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        if timeout <= 0 or interval <= 0:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--timeout` and `--interval` must be positive integers.",
-                details={"timeout": timeout, "interval": interval},
-            )
-        with managed_client(client_factory=build_client) as client:
-            started = time.time()
-            warnings: list[str] = []
-            while True:
-                current, payload, status_warnings = _read_transcript_status(client, meeting_id)
-                warnings.extend(status_warnings)
-                if current == TranscriptStatus.PROCESSING:
-                    if (time.time() - started) >= timeout:
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            if timeout <= 0 or interval <= 0:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--timeout` and `--interval` must be positive integers.",
+                    details={"timeout": timeout, "interval": interval},
+                )
+            with managed_client(client_factory=build_client) as client:
+                started = time.time()
+                warnings: list[str] = []
+                while True:
+                    current, payload, status_warnings = _read_transcript_status(client, meeting_id)
+                    warnings.extend(status_warnings)
+                    if current == TranscriptStatus.PROCESSING:
+                        if (time.time() - started) >= timeout:
+                            raise CliError(
+                                DomainCode.ARTIFACT_NOT_READY,
+                                "Transcript wait timed out.",
+                                details={"meeting_id": meeting_id, "timeout": timeout},
+                            )
+                        if not json_output:
+                            elapsed = int(time.time() - started)
+                            typer.echo(
+                                f"Transcript still processing — next check in {interval}s ({elapsed}s elapsed)...",
+                                err=True,
+                            )
+                        time.sleep(interval)
+                        continue
+                    if current == TranscriptStatus.READY:
+                        emit_success(
+                            command,
+                            {"meeting_id": meeting_id, "status": current.value, "updated_at": payload.get("updatedAt")},
+                            as_json=json_output,
+                            warnings=list(dict.fromkeys(warnings)),
+                        )
+                        return
+                    if current == TranscriptStatus.FAILED:
                         raise CliError(
-                            DomainCode.ARTIFACT_NOT_READY,
-                            "Transcript wait timed out.",
-                            details={"meeting_id": meeting_id, "timeout": timeout},
+                            DomainCode.INTERNAL_ERROR,
+                            "Transcript processing failed.",
+                            details={"meeting_id": meeting_id},
                         )
-                    if not json_output:
-                        elapsed = int(time.time() - started)
-                        typer.echo(
-                            f"Transcript still processing — next check in {interval}s ({elapsed}s elapsed)...",
-                            err=True,
+                    if current == TranscriptStatus.NO_ACCESS:
+                        raise CliError(DomainCode.NO_ACCESS, "No access to transcript.", details={"meeting_id": meeting_id})
+                    if current == TranscriptStatus.TRANSCRIPT_DISABLED:
+                        raise CliError(
+                            DomainCode.TRANSCRIPT_DISABLED,
+                            "Transcript feature is disabled for this org/site.",
+                            details={"meeting_id": meeting_id},
                         )
-                    time.sleep(interval)
-                    continue
-                if current == TranscriptStatus.READY:
-                    emit_success(
-                        command,
-                        {"meeting_id": meeting_id, "status": current.value, "updated_at": payload.get("updatedAt")},
-                        as_json=json_output,
-                        warnings=list(dict.fromkeys(warnings)),
-                    )
-                    return
-                if current == TranscriptStatus.FAILED:
-                    raise CliError(
-                        DomainCode.INTERNAL_ERROR,
-                        "Transcript processing failed.",
-                        details={"meeting_id": meeting_id},
-                    )
-                if current == TranscriptStatus.NO_ACCESS:
-                    raise CliError(DomainCode.NO_ACCESS, "No access to transcript.", details={"meeting_id": meeting_id})
-                if current == TranscriptStatus.TRANSCRIPT_DISABLED:
-                    raise CliError(
-                        DomainCode.TRANSCRIPT_DISABLED,
-                        "Transcript feature is disabled for this org/site.",
-                        details={"meeting_id": meeting_id},
-                    )
-                # not_found and not_recorded map to NOT_FOUND contract
-                raise CliError(DomainCode.NOT_FOUND, "Transcript not found.", details={"meeting_id": meeting_id})
+                    # not_found and not_recorded map to NOT_FOUND contract
+                    raise CliError(DomainCode.NOT_FOUND, "Transcript not found.", details={"meeting_id": meeting_id})
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -287,22 +395,24 @@ def download_transcript(
     format_value: str = typer.Option(..., "--format", help="File format: txt (default), vtt, or json."),
     out: str = typer.Option(..., "--out", help="Output file path."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the file if it already exists."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript download"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        api_format, output_format = _normalize_download_format(format_value)
-        with managed_client(client_factory=build_client) as client:
-            transcript_id = _resolve_transcript_id(client, meeting_id)
-            data_bytes = client.download_transcript(transcript_id, api_format)
-        output_path = Path(out)
-        atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
-        emit_success(
-            command,
-            {"meeting_id": meeting_id, "format": output_format, "output_path": str(output_path)},
-            as_json=json_output,
-        )
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            api_format, output_format = _normalize_download_format(format_value)
+            with managed_client(client_factory=build_client) as client:
+                transcript_id = _resolve_transcript_id(client, meeting_id)
+                data_bytes = client.download_transcript(transcript_id, api_format)
+            output_path = Path(out)
+            atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
+            emit_success(
+                command,
+                {"meeting_id": meeting_id, "format": output_format, "output_path": str(output_path)},
+                as_json=json_output,
+            )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -321,137 +431,127 @@ def batch_transcripts(
         "--continue-on-error/--fail-fast",
         help="Continue processing remaining meetings after a failure, or stop immediately.",
     ),
+    concurrency: int = typer.Option(
+        DEFAULT_BATCH_CONCURRENCY,
+        "--concurrency",
+        help=f"Batch worker concurrency ({MIN_BATCH_CONCURRENCY}-{MAX_BATCH_CONCURRENCY}).",
+    ),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript batch"
     try:
-        api_format, output_format = _normalize_download_format(format_value)
-        continue_mode = continue_on_error
-
-        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
-        with managed_client(client_factory=build_client) as client:
-            meetings, warnings = fetch_all_pages(
-                lambda token: client.list_meetings(
-                    from_utc=from_utc,
-                    to_utc=to_utc,
-                    page_size=50,
-                    page_token=token,
+        with profile_scope(profile):
+            api_format, output_format = _normalize_download_format(format_value)
+            continue_mode = continue_on_error
+            if concurrency < MIN_BATCH_CONCURRENCY or concurrency > MAX_BATCH_CONCURRENCY:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    f"`--concurrency` must be between {MIN_BATCH_CONCURRENCY} and {MAX_BATCH_CONCURRENCY}.",
+                    details={"concurrency": concurrency},
                 )
-            )
-            target_dir = Path(download_dir)
-            target_dir.mkdir(parents=True, exist_ok=True)
 
-            results: list[dict[str, Any]] = []
-            success = 0
-            skipped = 0
-            failed = 0
-            total = len(meetings)
-            for index, meeting in enumerate(meetings, start=1):
-                meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
-                if not json_output:
-                    typer.echo(f"[{index}/{total}] processing meeting_id={meeting_id or 'unknown'}", err=True)
-                if not meeting_id:
-                    skipped += 1
-                    results.append(
-                        {
-                            "meeting_id": None,
-                            "status": "skipped",
-                            "output_path": None,
-                            "error_code": "NOT_FOUND",
-                            "error_message": "Meeting missing id.",
-                        }
+            from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
+            with managed_client(client_factory=build_client) as client:
+                meetings, warnings = fetch_all_pages(
+                    lambda token: client.list_meetings(
+                        from_utc=from_utc,
+                        to_utc=to_utc,
+                        page_size=50,
+                        page_token=token,
                     )
-                    continue
-                try:
-                    status_value, _, _ = _read_transcript_status(client, meeting_id)
-                    if status_value != TranscriptStatus.READY:
-                        if status_value == TranscriptStatus.FAILED:
-                            failed += 1
-                            results.append(
-                                {
-                                    "meeting_id": meeting_id,
+                )
+                target_dir = Path(download_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                total = len(meetings)
+                indexed_meetings = list(enumerate(meetings))
+                results_by_index: dict[int, dict[str, Any]] = {}
+                first_terminal_error: CliError | None = None
+                next_to_submit = 0
+
+                with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                    inflight: dict[Future[tuple[dict[str, Any], CliError | None]], int] = {}
+
+                    def _submit(idx: int, meeting: dict[str, Any]) -> None:
+                        if not json_output:
+                            meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
+                            typer.echo(f"[{idx + 1}/{total}] processing meeting_id={meeting_id or 'unknown'}", err=True)
+                        inflight[executor.submit(
+                            _process_batch_item,
+                            meeting,
+                            api_format=api_format,
+                            output_format=output_format,
+                            target_dir=target_dir,
+                        )] = idx
+
+                    while next_to_submit < total and len(inflight) < concurrency:
+                        idx, meeting = indexed_meetings[next_to_submit]
+                        _submit(idx, meeting)
+                        next_to_submit += 1
+
+                    while inflight:
+                        completed, _ = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            idx = inflight.pop(future)
+                            try:
+                                result, terminal_error = future.result()
+                            except Exception as exc:
+                                terminal_error = CliError(
+                                    DomainCode.INTERNAL_ERROR,
+                                    "Unexpected batch worker error.",
+                                    details={"error_type": type(exc).__name__},
+                                )
+                                result = {
+                                    "meeting_id": str(meetings[idx].get("id") or meetings[idx].get("meetingId") or ""),
                                     "status": "failed",
                                     "output_path": None,
-                                    "error_code": DomainCode.INTERNAL_ERROR.value,
-                                    "error_message": "Transcript processing failed.",
+                                    "error_code": terminal_error.code.value,
+                                    "error_message": terminal_error.message,
                                 }
-                            )
-                            if not continue_mode:
-                                raise CliError(
-                                    DomainCode.INTERNAL_ERROR,
-                                    "Transcript processing failed.",
-                                    details={"meeting_id": meeting_id},
-                                )
-                            continue
-                        skipped += 1
-                        results.append(
-                            {
-                                "meeting_id": meeting_id,
-                                "status": "skipped",
-                                "output_path": None,
-                                "error_code": None,
-                                "error_message": f"Transcript status is {status_value.value}.",
-                            }
-                        )
-                        continue
+                            results_by_index[idx] = result
+                            if terminal_error and first_terminal_error is None:
+                                first_terminal_error = terminal_error
 
-                    transcript_id = _resolve_transcript_id(client, meeting_id)
-                    content = client.download_transcript(transcript_id, api_format)
-                    artifact_id = transcript_id
-                    download_url = None
-                    filename = _batch_filename(meeting, output_format, artifact_id=artifact_id, download_url=download_url)
-                    out_path = target_dir / filename
-                    atomic_write_bytes(out_path, content, overwrite=False)
-                    success += 1
-                    results.append(
-                        {
-                            "meeting_id": meeting_id,
-                            "status": "success",
-                            "output_path": str(out_path),
-                            "error_code": None,
-                            "error_message": None,
-                        }
-                    )
-                except CliError as exc:
-                    if exc.code == DomainCode.OVERWRITE_CONFLICT:
-                        skipped += 1
-                        results.append(
-                            {
-                                "meeting_id": meeting_id,
-                                "status": "skipped",
-                                "output_path": None,
-                                "error_code": exc.code.value,
-                                "error_message": exc.message,
-                            }
-                        )
-                        if not continue_mode:
-                            raise
-                        continue
-                    failed += 1
-                    results.append(
-                        {
-                            "meeting_id": meeting_id,
-                            "status": "failed",
+                        while (
+                            continue_mode or first_terminal_error is None
+                        ) and next_to_submit < total and len(inflight) < concurrency:
+                            idx, meeting = indexed_meetings[next_to_submit]
+                            _submit(idx, meeting)
+                            next_to_submit += 1
+
+                if not continue_mode and first_terminal_error and next_to_submit < total:
+                    for idx in range(next_to_submit, total):
+                        meeting = meetings[idx]
+                        results_by_index[idx] = {
+                            "meeting_id": str(meeting.get("id") or meeting.get("meetingId") or ""),
+                            "status": "skipped",
                             "output_path": None,
-                            "error_code": exc.code.value,
-                            "error_message": exc.message,
+                            "error_code": "FAIL_FAST_ABORTED",
+                            "error_message": "Skipped due to fail-fast after first terminal failure.",
                         }
-                    )
-                    if not continue_mode:
-                        raise
 
-            emit_success(
-                command,
-                {
-                    "total_meetings": len(meetings),
-                    "success": success,
-                    "skipped": skipped,
-                    "failed": failed,
-                    "results": results,
-                },
-                as_json=json_output,
-                warnings=warnings,
-            )
+                results = [results_by_index[idx] for idx in sorted(results_by_index)]
+                success = sum(1 for item in results if item.get("status") == "success")
+                skipped = sum(1 for item in results if item.get("status") == "skipped")
+                failed = sum(1 for item in results if item.get("status") == "failed")
+
+                emit_success(
+                    command,
+                    {
+                        "total_meetings": total,
+                        "success": success,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "results": results,
+                    },
+                    as_json=json_output,
+                    warnings=warnings,
+                )
+                if not continue_mode and first_terminal_error is not None:
+                    raise typer.Exit(code=first_terminal_error.exit_code)
+    except typer.Exit:
+        raise
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:

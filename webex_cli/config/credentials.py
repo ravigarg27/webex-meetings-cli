@@ -26,6 +26,11 @@ if os.name == "nt":
 class CredentialRecord:
     token: str
     backend: str | None = None
+    auth_type: str = "pat"
+    refresh_token: str | None = None
+    expires_at: str | None = None
+    scopes: list[str] | None = None
+    invalid_reason: str | None = None
 
 
 class CredentialStore:
@@ -34,6 +39,12 @@ class CredentialStore:
 
     def _metadata_path(self) -> Path:
         return config_dir() / f"{self.profile}-metadata.json"
+
+    def _keyring_account_access(self) -> str:
+        return self.profile
+
+    def _keyring_account_refresh(self) -> str:
+        return f"{self.profile}:refresh"
 
     def _keyring_available(self) -> bool:
         try:
@@ -59,6 +70,9 @@ class CredentialStore:
             return {}
 
     def _save_fallback(self, token: str) -> None:
+        self._save_fallback_bundle(token=token, refresh_token=None)
+
+    def _save_fallback_bundle(self, *, token: str, refresh_token: str | None) -> None:
         cfg = config_dir()
         cfg.mkdir(parents=True, exist_ok=True)
         path = fallback_credentials_path()
@@ -76,29 +90,55 @@ class CredentialStore:
                     DomainCode.INTERNAL_ERROR,
                     "Unable to securely store token in Windows fallback store.",
                 ) from exc
-            payload[self.profile] = {"token_dpapi": base64.b64encode(encrypted).decode("ascii")}
+            item: dict[str, str] = {"token_dpapi": base64.b64encode(encrypted).decode("ascii")}
+            if refresh_token:
+                try:
+                    refresh_encrypted = self._dpapi_encrypt(refresh_token.encode("utf-8"))
+                except Exception as exc:
+                    raise CliError(
+                        DomainCode.INTERNAL_ERROR,
+                        "Unable to securely store refresh token in Windows fallback store.",
+                    ) from exc
+                item["refresh_token_dpapi"] = base64.b64encode(refresh_encrypted).decode("ascii")
+            payload[self.profile] = item
         else:
-            payload[self.profile] = {"token": token}
+            item = {"token": token}
+            if refresh_token:
+                item["refresh_token"] = refresh_token
+            payload[self.profile] = item
         self._write_json(path, payload)
 
     def _load_fallback(self) -> str | None:
+        return self._load_fallback_bundle().get("token")
+
+    def _load_fallback_bundle(self) -> dict[str, str | None]:
         path = fallback_credentials_path()
         if not path.exists():
-            return None
+            return {"token": None, "refresh_token": None}
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return None
+            return {"token": None, "refresh_token": None}
         item = payload.get(self.profile)
         if not item:
-            return None
+            return {"token": None, "refresh_token": None}
         if isinstance(item, dict) and item.get("token_dpapi") and os.name == "nt":
             try:
                 encrypted = base64.b64decode(str(item["token_dpapi"]))
-                return self._dpapi_decrypt(encrypted).decode("utf-8")
+                token = self._dpapi_decrypt(encrypted).decode("utf-8")
+                refresh_token: str | None = None
+                if item.get("refresh_token_dpapi"):
+                    refresh_encrypted = base64.b64decode(str(item["refresh_token_dpapi"]))
+                    refresh_token = self._dpapi_decrypt(refresh_encrypted).decode("utf-8")
+                return {"token": token, "refresh_token": refresh_token}
             except Exception:
-                return None
-        return item.get("token")
+                return {"token": None, "refresh_token": None}
+        if isinstance(item, dict):
+            return {
+                "token": item.get("token"),
+                "refresh_token": item.get("refresh_token"),
+            }
+        return {"token": None, "refresh_token": None}
 
     def save(self, record: CredentialRecord) -> str:
         backend = "file_fallback"
@@ -106,38 +146,64 @@ class CredentialStore:
             try:
                 import keyring
 
-                keyring.set_password(SERVICE_NAME, self.profile, record.token)
+                keyring.set_password(SERVICE_NAME, self._keyring_account_access(), record.token)
+                if record.refresh_token:
+                    keyring.set_password(SERVICE_NAME, self._keyring_account_refresh(), record.refresh_token)
+                else:
+                    try:
+                        keyring.delete_password(SERVICE_NAME, self._keyring_account_refresh())
+                    except Exception:
+                        pass
                 backend = "keyring"
             except Exception:
-                self._save_fallback(record.token)
+                self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         else:
-            self._save_fallback(record.token)
+            self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         self._save_metadata(
             {
                 "credential_backend": backend,
+                "auth_type": record.auth_type,
+                "expires_at": record.expires_at,
+                "scopes": record.scopes or [],
+                "invalid_reason": record.invalid_reason,
             }
         )
         return backend
 
     def load(self) -> CredentialRecord:
         token: str | None = None
+        refresh_token: str | None = None
         if self._keyring_available():
             try:
                 import keyring
 
-                token = keyring.get_password(SERVICE_NAME, self.profile)
+                token = keyring.get_password(SERVICE_NAME, self._keyring_account_access())
+                refresh_token = keyring.get_password(SERVICE_NAME, self._keyring_account_refresh())
             except Exception:
-                token = self._load_fallback()
+                fallback = self._load_fallback_bundle()
+                token = fallback.get("token")
+                refresh_token = fallback.get("refresh_token")
         else:
-            token = self._load_fallback()
+            fallback = self._load_fallback_bundle()
+            token = fallback.get("token")
+            refresh_token = fallback.get("refresh_token")
 
         if not token:
             raise CliError(DomainCode.AUTH_REQUIRED, "No credentials found. Run `webex auth login`.")
 
         metadata = self._load_metadata()
+        scopes = metadata.get("scopes")
+        if not isinstance(scopes, list):
+            scopes = []
+        auth_type = str(metadata.get("auth_type") or "pat")
         return CredentialRecord(
             token=token,
             backend=metadata.get("credential_backend"),
+            auth_type=auth_type,
+            refresh_token=refresh_token,
+            expires_at=metadata.get("expires_at"),
+            scopes=[str(scope) for scope in scopes],
+            invalid_reason=metadata.get("invalid_reason"),
         )
 
     def clear(self) -> None:
@@ -145,7 +211,11 @@ class CredentialStore:
             try:
                 import keyring
 
-                keyring.delete_password(SERVICE_NAME, self.profile)
+                keyring.delete_password(SERVICE_NAME, self._keyring_account_access())
+            except Exception:
+                pass
+            try:
+                keyring.delete_password(SERVICE_NAME, self._keyring_account_refresh())
             except Exception:
                 pass
         path = fallback_credentials_path()
@@ -160,6 +230,17 @@ class CredentialStore:
         metadata = self._metadata_path()
         if metadata.exists():
             metadata.unlink()
+
+    def mark_invalid(self, reason: str) -> None:
+        metadata = self._load_metadata()
+        metadata["invalid_reason"] = reason
+        self._save_metadata(metadata)
+
+    def clear_invalid(self) -> None:
+        metadata = self._load_metadata()
+        if "invalid_reason" in metadata:
+            metadata.pop("invalid_reason")
+            self._save_metadata(metadata)
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:

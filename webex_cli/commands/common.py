@@ -3,16 +3,23 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 import re
+import threading
 from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 import typer
 
 from webex_cli.client import WebexApiClient
-from webex_cli.config import CredentialStore, load_settings
+from webex_cli.config import CredentialStore, ProfileStore, load_settings
+from webex_cli.config.credentials import CredentialRecord
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.oauth import is_expiring_soon, refresh_access_token, resolve_oauth_device_config
 from webex_cli.output.human import emit_error_human, emit_success_human, emit_warnings_human
 from webex_cli.output.json_renderer import emit_error_json, emit_success_json
+from webex_cli.runtime import get_current_profile, use_profile
+
+_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_REFRESH_LOCKS_GUARD = threading.Lock()
 
 
 def emit_success(command: str, data: object, as_json: bool, warnings: list[str] | None = None) -> None:
@@ -76,17 +83,108 @@ def resolve_base_url() -> str:
 def resolve_effective_timezone(cli_tz: str | None) -> str | None:
     if cli_tz:
         return cli_tz
+    profile_key = resolve_profile()
+    profile_tz = ProfileStore().profile_default_tz(profile_key)
+    if profile_tz:
+        return profile_tz
     settings = load_settings()
     return settings.default_tz
 
 
+def resolve_profile() -> str:
+    explicit = get_current_profile()
+    env_profile = os.environ.get("WEBEX_PROFILE")
+    preferred = explicit if explicit else env_profile
+    return ProfileStore().resolve(preferred=preferred)
+
+
 def load_token() -> str:
-    record = CredentialStore().load()
+    return load_credential_record().token
+
+
+def _profile_refresh_lock(profile_key: str) -> threading.Lock:
+    with _REFRESH_LOCKS_GUARD:
+        lock = _REFRESH_LOCKS.get(profile_key)
+        if lock is None:
+            lock = threading.Lock()
+            _REFRESH_LOCKS[profile_key] = lock
+        return lock
+
+
+def _refresh_oauth_record(profile_key: str, *, force: bool) -> CredentialRecord:
+    lock = _profile_refresh_lock(profile_key)
+    with lock:
+        store = CredentialStore(profile=profile_key)
+        current = store.load()
+        if current.auth_type != "oauth":
+            return current
+        if not force and not is_expiring_soon(current.expires_at):
+            return current
+        if not current.refresh_token:
+            store.mark_invalid("invalid")
+            raise CliError(
+                DomainCode.AUTH_INVALID,
+                "OAuth session is missing a refresh token. Re-authenticate.",
+                details={"auth_cause": "invalid"},
+            )
+
+        try:
+            config = resolve_oauth_device_config()
+            refreshed = refresh_access_token(config, current.refresh_token)
+        except CliError as exc:
+            if exc.code == DomainCode.AUTH_INVALID:
+                cause = str((exc.details or {}).get("auth_cause") or "invalid")
+                store.mark_invalid(cause)
+            raise
+
+        store.save(
+            CredentialRecord(
+                token=refreshed.access_token,
+                auth_type="oauth",
+                refresh_token=refreshed.refresh_token or current.refresh_token,
+                expires_at=refreshed.expires_at,
+                scopes=refreshed.scopes,
+                invalid_reason=None,
+            )
+        )
+        store.clear_invalid()
+        return store.load()
+
+
+def _refresh_oauth_token(profile_key: str) -> str:
+    record = _refresh_oauth_record(profile_key, force=True)
     return record.token
 
 
+def load_credential_record() -> CredentialRecord:
+    profile_key = resolve_profile()
+    store = CredentialStore(profile=profile_key)
+    record = store.load()
+    if record.invalid_reason:
+        raise CliError(
+            DomainCode.AUTH_INVALID,
+            "Stored OAuth session is invalid. Run `webex auth login` again.",
+            details={"auth_cause": record.invalid_reason},
+        )
+    if record.auth_type == "oauth":
+        record = _refresh_oauth_record(profile_key, force=False)
+    return record
+
+
 def build_client(token: str | None = None) -> WebexApiClient:
-    return WebexApiClient(base_url=resolve_base_url(), token=token or load_token())
+    if token is not None:
+        return WebexApiClient(base_url=resolve_base_url(), token=token)
+
+    profile_key = resolve_profile()
+    record = load_credential_record()
+    refresh_callback: Callable[[], str] | None = None
+    if record.auth_type == "oauth":
+        refresh_callback = lambda: _refresh_oauth_token(profile_key)
+    return WebexApiClient(
+        base_url=resolve_base_url(),
+        token=record.token,
+        refresh_token_callback=refresh_callback,
+    )
 
 
 @contextmanager
@@ -148,3 +246,12 @@ def validate_id(value: str, name: str = "id") -> str:
             details={name: value},
         )
     return candidate
+
+
+@contextmanager
+def profile_scope(profile: str | None) -> Iterator[None]:
+    if profile is None:
+        yield
+        return
+    with use_profile(profile):
+        yield

@@ -49,3 +49,31 @@ def test_save_recovers_from_corrupt_fallback_file(monkeypatch) -> None:
         assert store.load().token == "token123"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_save_and_load_oauth_bundle_in_fallback_store(monkeypatch) -> None:
+    tmp_path = Path(".test_tmp") / f"credentials-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
+    try:
+        store = CredentialStore()
+        backend = store.save(
+            CredentialRecord(
+                token="access-token",
+                auth_type="oauth",
+                refresh_token="refresh-token",
+                expires_at="2026-03-05T00:00:00+00:00",
+                scopes=["spark:all"],
+            )
+        )
+        assert backend == "file_fallback"
+
+        loaded = store.load()
+        assert loaded.token == "access-token"
+        assert loaded.auth_type == "oauth"
+        assert loaded.refresh_token == "refresh-token"
+        assert loaded.expires_at == "2026-03-05T00:00:00+00:00"
+        assert loaded.scopes == ["spark:all"]
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

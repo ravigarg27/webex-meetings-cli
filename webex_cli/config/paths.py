@@ -23,3 +23,14 @@ def settings_path() -> Path:
 def fallback_credentials_path() -> Path:
     return config_dir() / "credentials.json"
 
+
+def profiles_path() -> Path:
+    return config_dir() / "profiles.json"
+
+
+def profile_migration_marker_path() -> Path:
+    return config_dir() / "migration-profile-1.1.json"
+
+
+def legacy_metadata_path() -> Path:
+    return config_dir() / "metadata.json"

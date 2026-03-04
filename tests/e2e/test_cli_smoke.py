@@ -77,8 +77,11 @@ class _FakeStore:
 
 def _mock_default_mode(monkeypatch):
     fake_store = _FakeStore()
+    monkeypatch.setattr(auth_commands, "resolve_profile", lambda: "default")
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeClient())
-    monkeypatch.setattr(auth_commands, "CredentialStore", lambda: fake_store)
+    monkeypatch.setattr(auth_commands, "CredentialStore", lambda *args, **kwargs: fake_store)
+    monkeypatch.setattr(auth_commands, "load_credential_record", lambda: fake_store.record)
+    monkeypatch.setattr(meeting_commands, "resolve_effective_timezone", lambda cli_tz: cli_tz or "UTC")
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _FakeClient())
@@ -91,7 +94,8 @@ def test_cli_smoke_mocked_mode(monkeypatch) -> None:
 
     assert runner.invoke(app, ["auth", "login"]).exit_code == 0
     assert runner.invoke(app, ["auth", "whoami", "--json"]).exit_code == 0
-    assert runner.invoke(app, ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"]).exit_code == 0
+    meeting_result = runner.invoke(app, ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"])
+    assert meeting_result.exit_code == 0, meeting_result.stdout
     last_result = runner.invoke(app, ["meeting", "list", "--last", "3", "--json"])
     assert last_result.exit_code == 0
     last_data = json.loads(last_result.stdout)

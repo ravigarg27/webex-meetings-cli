@@ -14,6 +14,7 @@ from webex_cli.commands.common import (
     fetch_all_pages,
     handle_unexpected,
     managed_client,
+    profile_scope,
     resolve_effective_timezone,
     validate_id,
 )
@@ -132,57 +133,59 @@ def list_recordings(
     tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
     page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording list"
     try:
-        if last is not None and (from_value is not None or to_value is not None):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "Use either --last or --from/--to, not both.",
-            )
-        if last is not None:
-            if last < 1:
+        with profile_scope(profile):
+            if last is not None and (from_value is not None or to_value is not None):
                 raise CliError(
                     DomainCode.VALIDATION_ERROR,
-                    "`--last` must be a positive integer.",
-                    details={"last": last},
+                    "Use either --last or --from/--to, not both.",
                 )
-            now = datetime.now(timezone.utc)
-            to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if from_value is None or to_value is None:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "Provide --from and --to, or use --last N.",
+            if last is not None:
+                if last < 1:
+                    raise CliError(
+                        DomainCode.VALIDATION_ERROR,
+                        "`--last` must be a positive integer.",
+                        details={"last": last},
+                    )
+                now = datetime.now(timezone.utc)
+                to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if from_value is None or to_value is None:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "Provide --from and --to, or use --last N.",
+                )
+            if page_size < 1 or page_size > 200:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--page-size` must be between 1 and 200.",
+                    details={"page_size": page_size},
+                )
+            from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
+            with managed_client(client_factory=build_client) as client:
+                items, warnings = fetch_all_pages(
+                    lambda token: client.list_recordings(
+                        from_utc=from_utc,
+                        to_utc=to_utc,
+                        page_size=page_size,
+                        page_token=token,
+                    ),
+                    start_token=page_token,
+                )
+            normalized = [_normalize_recording(item) for item in items]
+            normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
+            if last is not None:
+                normalized = normalized[:last]
+            emit_success(
+                command,
+                {"items": normalized, "next_page_token": None},
+                as_json=json_output,
+                warnings=warnings,
             )
-        if page_size < 1 or page_size > 200:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--page-size` must be between 1 and 200.",
-                details={"page_size": page_size},
-            )
-        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
-        with managed_client(client_factory=build_client) as client:
-            items, warnings = fetch_all_pages(
-                lambda token: client.list_recordings(
-                    from_utc=from_utc,
-                    to_utc=to_utc,
-                    page_size=page_size,
-                    page_token=token,
-                ),
-                start_token=page_token,
-            )
-        normalized = [_normalize_recording(item) for item in items]
-        normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
-        if last is not None:
-            normalized = normalized[:last]
-        emit_success(
-            command,
-            {"items": normalized, "next_page_token": None},
-            as_json=json_output,
-            warnings=warnings,
-        )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -193,44 +196,46 @@ def list_recordings(
 def status_recording(
     meeting_id: str,
     recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording status"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        if recording_id:
-            recording_id = validate_id(recording_id, "recording_id")
-        with managed_client(client_factory=build_client) as client:
-            try:
-                item = _resolve_recording(client, meeting_id, recording_id)
-            except CliError as exc:
-                mapped = _status_from_exception(exc)
-                if mapped is not None:
-                    emit_success(
-                        command,
-                        {"meeting_id": meeting_id, "recording_id": recording_id, "status": mapped.value},
-                        as_json=json_output,
-                    )
-                    return
-                raise
-        if item is None:
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            if recording_id:
+                recording_id = validate_id(recording_id, "recording_id")
+            with managed_client(client_factory=build_client) as client:
+                try:
+                    item = _resolve_recording(client, meeting_id, recording_id)
+                except CliError as exc:
+                    mapped = _status_from_exception(exc)
+                    if mapped is not None:
+                        emit_success(
+                            command,
+                            {"meeting_id": meeting_id, "recording_id": recording_id, "status": mapped.value},
+                            as_json=json_output,
+                        )
+                        return
+                    raise
+            if item is None:
+                emit_success(
+                    command,
+                    {"meeting_id": meeting_id, "recording_id": recording_id, "status": RecordingStatus.NOT_RECORDED.value},
+                    as_json=json_output,
+                )
+                return
+            status_value, warnings = _status_from_recording_item(item)
             emit_success(
                 command,
-                {"meeting_id": meeting_id, "recording_id": recording_id, "status": RecordingStatus.NOT_RECORDED.value},
+                {
+                    "meeting_id": meeting_id,
+                    "recording_id": item.get("id") or recording_id,
+                    "status": status_value.value,
+                },
                 as_json=json_output,
+                warnings=warnings,
             )
-            return
-        status_value, warnings = _status_from_recording_item(item)
-        emit_success(
-            command,
-            {
-                "meeting_id": meeting_id,
-                "recording_id": item.get("id") or recording_id,
-                "status": status_value.value,
-            },
-            as_json=json_output,
-            warnings=warnings,
-        )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -244,43 +249,45 @@ def download_recording(
     recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
     quality: str = typer.Option("best", "--quality", help="Preferred video quality: best (default), high, or medium. Falls back to the next available quality."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the output file if it already exists."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording download"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        if recording_id:
-            recording_id = validate_id(recording_id, "recording_id")
-        if quality not in {"best", "high", "medium"}:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--quality` must be one of: best, high, medium.",
-                details={"quality": quality},
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            if recording_id:
+                recording_id = validate_id(recording_id, "recording_id")
+            if quality not in {"best", "high", "medium"}:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--quality` must be one of: best, high, medium.",
+                    details={"quality": quality},
+                )
+            with managed_client(client_factory=build_client) as client:
+                selected = _resolve_recording(client, meeting_id, recording_id)
+                if selected is None:
+                    raise CliError(DomainCode.NOT_FOUND, "No recording found for meeting.", details={"meeting_id": meeting_id})
+                selected_id = selected.get("id") or selected.get("recordingId")
+                if not selected_id:
+                    raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
+                content, actual_quality = client.download_recording(str(selected_id), quality)
+            output_path = Path(out)
+            atomic_write_bytes(output_path, content, overwrite=overwrite)
+            warnings: list[str] = []
+            if actual_quality != quality:
+                warnings.append("QUALITY_FALLBACK")
+            emit_success(
+                command,
+                {
+                    "meeting_id": meeting_id,
+                    "recording_id": str(selected_id),
+                    "quality": actual_quality,
+                    "output_path": str(output_path),
+                },
+                as_json=json_output,
+                warnings=warnings,
             )
-        with managed_client(client_factory=build_client) as client:
-            selected = _resolve_recording(client, meeting_id, recording_id)
-            if selected is None:
-                raise CliError(DomainCode.NOT_FOUND, "No recording found for meeting.", details={"meeting_id": meeting_id})
-            selected_id = selected.get("id") or selected.get("recordingId")
-            if not selected_id:
-                raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
-            content, actual_quality = client.download_recording(str(selected_id), quality)
-        output_path = Path(out)
-        atomic_write_bytes(output_path, content, overwrite=overwrite)
-        warnings: list[str] = []
-        if actual_quality != quality:
-            warnings.append("QUALITY_FALLBACK")
-        emit_success(
-            command,
-            {
-                "meeting_id": meeting_id,
-                "recording_id": str(selected_id),
-                "quality": actual_quality,
-                "output_path": str(output_path),
-            },
-            as_json=json_output,
-            warnings=warnings,
-        )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:

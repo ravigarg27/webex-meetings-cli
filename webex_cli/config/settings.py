@@ -15,6 +15,12 @@ from webex_cli.errors import CliError, DomainCode
 class Settings:
     api_base_url: str = "https://webexapis.com"
     default_tz: str | None = None
+    oauth_client_id: str | None = None
+    oauth_device_authorize_url: str | None = None
+    oauth_token_url: str | None = None
+    oauth_scope: str | None = None
+    oauth_poll_interval_seconds: int | None = None
+    oauth_timeout_seconds: int | None = None
 
 
 def load_settings() -> Settings:
@@ -37,6 +43,12 @@ def load_settings() -> Settings:
         )
     api_base_url = data.get("api_base_url", "https://webexapis.com")
     default_tz = data.get("default_tz")
+    oauth_client_id = data.get("oauth_client_id")
+    oauth_device_authorize_url = data.get("oauth_device_authorize_url")
+    oauth_token_url = data.get("oauth_token_url")
+    oauth_scope = data.get("oauth_scope")
+    oauth_poll_interval_seconds = data.get("oauth_poll_interval_seconds")
+    oauth_timeout_seconds = data.get("oauth_timeout_seconds")
     if not isinstance(api_base_url, str):
         raise CliError(
             DomainCode.VALIDATION_ERROR,
@@ -49,9 +61,51 @@ def load_settings() -> Settings:
             "`default_tz` must be a string when set.",
             details={"path": str(path)},
         )
+    if oauth_client_id is not None and not isinstance(oauth_client_id, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_client_id` must be a string when set.",
+            details={"path": str(path)},
+        )
+    if oauth_device_authorize_url is not None and not isinstance(oauth_device_authorize_url, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_device_authorize_url` must be a string when set.",
+            details={"path": str(path)},
+        )
+    if oauth_token_url is not None and not isinstance(oauth_token_url, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_token_url` must be a string when set.",
+            details={"path": str(path)},
+        )
+    if oauth_scope is not None and not isinstance(oauth_scope, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_scope` must be a string when set.",
+            details={"path": str(path)},
+        )
+    if oauth_poll_interval_seconds is not None and not isinstance(oauth_poll_interval_seconds, int):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_poll_interval_seconds` must be an integer when set.",
+            details={"path": str(path)},
+        )
+    if oauth_timeout_seconds is not None and not isinstance(oauth_timeout_seconds, int):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "`oauth_timeout_seconds` must be an integer when set.",
+            details={"path": str(path)},
+        )
     return Settings(
         api_base_url=api_base_url,
         default_tz=default_tz,
+        oauth_client_id=oauth_client_id,
+        oauth_device_authorize_url=oauth_device_authorize_url,
+        oauth_token_url=oauth_token_url,
+        oauth_scope=oauth_scope,
+        oauth_poll_interval_seconds=oauth_poll_interval_seconds,
+        oauth_timeout_seconds=oauth_timeout_seconds,
     )
 
 
@@ -59,7 +113,16 @@ def save_settings(settings: Settings) -> None:
     cfg = config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
     path = settings_path()
-    payload = {"api_base_url": settings.api_base_url, "default_tz": settings.default_tz}
+    payload = {
+        "api_base_url": settings.api_base_url,
+        "default_tz": settings.default_tz,
+        "oauth_client_id": settings.oauth_client_id,
+        "oauth_device_authorize_url": settings.oauth_device_authorize_url,
+        "oauth_token_url": settings.oauth_token_url,
+        "oauth_scope": settings.oauth_scope,
+        "oauth_poll_interval_seconds": settings.oauth_poll_interval_seconds,
+        "oauth_timeout_seconds": settings.oauth_timeout_seconds,
+    }
     _write_json_atomic(path, payload)
 
 

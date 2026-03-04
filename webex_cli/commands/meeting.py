@@ -12,6 +12,7 @@ from webex_cli.commands.common import (
     fetch_all_pages,
     handle_unexpected,
     managed_client,
+    profile_scope,
     resolve_effective_timezone,
     validate_id,
 )
@@ -65,57 +66,59 @@ def list_meetings(
     tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
     page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting list"
     try:
-        if last is not None and (from_value is not None or to_value is not None):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "Use either --last or --from/--to, not both.",
-            )
-        if last is not None:
-            if last < 1:
+        with profile_scope(profile):
+            if last is not None and (from_value is not None or to_value is not None):
                 raise CliError(
                     DomainCode.VALIDATION_ERROR,
-                    "`--last` must be a positive integer.",
-                    details={"last": last},
+                    "Use either --last or --from/--to, not both.",
                 )
-            now = datetime.now(timezone.utc)
-            to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if from_value is None or to_value is None:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "Provide --from and --to, or use --last N.",
+            if last is not None:
+                if last < 1:
+                    raise CliError(
+                        DomainCode.VALIDATION_ERROR,
+                        "`--last` must be a positive integer.",
+                        details={"last": last},
+                    )
+                now = datetime.now(timezone.utc)
+                to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if from_value is None or to_value is None:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "Provide --from and --to, or use --last N.",
+                )
+            if page_size < 1 or page_size > 200:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--page-size` must be between 1 and 200.",
+                    details={"page_size": page_size},
+                )
+            from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
+            with managed_client(client_factory=build_client) as client:
+                items, warnings = fetch_all_pages(
+                    lambda token: client.list_meetings(
+                        from_utc=from_utc,
+                        to_utc=to_utc,
+                        page_size=page_size,
+                        page_token=token,
+                    ),
+                    start_token=page_token,
+                )
+            normalized = [_normalize_meeting(item) for item in items]
+            normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
+            if last is not None:
+                normalized = normalized[:last]
+            emit_success(
+                command,
+                {"items": normalized, "next_page_token": None},
+                as_json=json_output,
+                warnings=warnings,
             )
-        if page_size < 1 or page_size > 200:
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`--page-size` must be between 1 and 200.",
-                details={"page_size": page_size},
-            )
-        from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
-        with managed_client(client_factory=build_client) as client:
-            items, warnings = fetch_all_pages(
-                lambda token: client.list_meetings(
-                    from_utc=from_utc,
-                    to_utc=to_utc,
-                    page_size=page_size,
-                    page_token=token,
-                ),
-                start_token=page_token,
-            )
-        normalized = [_normalize_meeting(item) for item in items]
-        normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
-        if last is not None:
-            normalized = normalized[:last]
-        emit_success(
-            command,
-            {"items": normalized, "next_page_token": None},
-            as_json=json_output,
-            warnings=warnings,
-        )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -125,14 +128,16 @@ def list_meetings(
 @meeting_app.command("get", help="Fetch full details for a single meeting.")
 def get_meeting(
     meeting_id: str,
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting get"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        with managed_client(client_factory=build_client) as client:
-            item = client.get_meeting(meeting_id)
-        emit_success(command, item, as_json=json_output)
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            with managed_client(client_factory=build_client) as client:
+                item = client.get_meeting(meeting_id)
+            emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
@@ -142,21 +147,23 @@ def get_meeting(
 @meeting_app.command("join-url", help="Print the join URL for a meeting.")
 def join_url(
     meeting_id: str,
+    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting join-url"
     try:
-        meeting_id = validate_id(meeting_id, "meeting_id")
-        with managed_client(client_factory=build_client) as client:
-            item = client.get_meeting_join_url(meeting_id)
-        url = item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl")
-        if not url:
-            raise CliError(
-                DomainCode.NOT_FOUND,
-                "Join URL not available for meeting.",
-                details={"meeting_id": meeting_id},
-            )
-        emit_success(command, {"meeting_id": meeting_id, "join_url": url}, as_json=json_output)
+        with profile_scope(profile):
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            with managed_client(client_factory=build_client) as client:
+                item = client.get_meeting_join_url(meeting_id)
+            url = item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl")
+            if not url:
+                raise CliError(
+                    DomainCode.NOT_FOUND,
+                    "Join URL not available for meeting.",
+                    details={"meeting_id": meeting_id},
+                )
+            emit_success(command, {"meeting_id": meeting_id, "join_url": url}, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:

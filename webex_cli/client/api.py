@@ -37,6 +37,7 @@ class WebexApiClient:
     download_timeout_seconds: int = 300
     retry_attempts: int = 5
     max_delay_seconds: float = 8.0
+    refresh_token_callback: Callable[[], str] | None = None
     _client: httpx.Client | None = None
 
     def _headers(self) -> dict[str, str]:
@@ -136,6 +137,7 @@ class WebexApiClient:
     ) -> httpx.Response:
         delay = 0.5
         last_error: CliError | None = None
+        refreshed_after_401 = False
         for attempt in range(self.retry_attempts):
             try:
                 logger.debug("request attempt=%s method=%s target=%s", attempt + 1, method, target_for_log)
@@ -173,6 +175,22 @@ class WebexApiClient:
                     time.sleep(wait)
                 delay *= 2
                 continue
+
+            if response.status_code == 401 and self.refresh_token_callback and not refreshed_after_401:
+                logger.info("attempting oauth refresh after 401 method=%s target=%s", method, target_for_log)
+                new_token = self.refresh_token_callback()
+                if not new_token:
+                    raise self._map_response_error(response, path=path_for_error)
+                self.token = new_token
+                refreshed_after_401 = True
+                try:
+                    response = request_call()
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                    raise CliError(
+                        DomainCode.UPSTREAM_UNAVAILABLE,
+                        "Network error while calling upstream.",
+                        details={"exception": str(exc)},
+                    ) from exc
 
             if response.is_error:
                 logger.info(
