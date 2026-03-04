@@ -6,12 +6,16 @@ from typing import Any
 _SECRET_KEY_PARTS = ("token", "secret", "password", "authorization", "api_key", "apikey")
 
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]{8,}")
-_LONG_TOKEN_PATTERN = re.compile(r"\b[A-Za-z0-9._\-]{24,}\b")
+_JWT_PATTERN = re.compile(r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+_TOKEN_LABEL_PATTERN = re.compile(
+    r"(?i)\b(access_token|refresh_token|token|authorization)\b(\s*[:=]\s*)((?!bearer\b)[^\s,;]+)"
+)
 
 
 def redact_string(value: str) -> str:
     redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", value)
-    redacted = _LONG_TOKEN_PATTERN.sub("[REDACTED]", redacted)
+    redacted = _TOKEN_LABEL_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", redacted)
+    redacted = _JWT_PATTERN.sub("[REDACTED]", redacted)
     return redacted
 
 

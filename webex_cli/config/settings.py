@@ -11,6 +11,9 @@ from webex_cli.config.paths import config_dir, settings_path
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.utils.files import replace_file_atomic
 
+_SETTINGS_CACHE: Settings | None = None
+_SETTINGS_CACHE_KEY: tuple[str, bool, int | None] | None = None
+
 
 @dataclass
 class Settings:
@@ -24,10 +27,27 @@ class Settings:
     oauth_timeout_seconds: int | None = None
 
 
-def load_settings() -> Settings:
-    path = settings_path()
+def _settings_cache_key(path: Path) -> tuple[str, bool, int | None]:
     if not path.exists():
-        return Settings()
+        return (str(path), False, None)
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), True, None)
+    return (str(path), True, stat.st_mtime_ns)
+
+
+def load_settings() -> Settings:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_KEY
+    path = settings_path()
+    cache_key = _settings_cache_key(path)
+    if _SETTINGS_CACHE is not None and _SETTINGS_CACHE_KEY == cache_key:
+        return _SETTINGS_CACHE
+    if not path.exists():
+        settings = Settings()
+        _SETTINGS_CACHE = settings
+        _SETTINGS_CACHE_KEY = cache_key
+        return settings
     try:
         data: Any = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -98,7 +118,7 @@ def load_settings() -> Settings:
             "`oauth_timeout_seconds` must be an integer when set.",
             details={"path": str(path)},
         )
-    return Settings(
+    settings = Settings(
         api_base_url=api_base_url,
         default_tz=default_tz,
         oauth_client_id=oauth_client_id,
@@ -108,9 +128,13 @@ def load_settings() -> Settings:
         oauth_poll_interval_seconds=oauth_poll_interval_seconds,
         oauth_timeout_seconds=oauth_timeout_seconds,
     )
+    _SETTINGS_CACHE = settings
+    _SETTINGS_CACHE_KEY = cache_key
+    return settings
 
 
 def save_settings(settings: Settings) -> None:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_KEY
     cfg = config_dir()
     cfg.mkdir(parents=True, exist_ok=True)
     path = settings_path()
@@ -125,6 +149,8 @@ def save_settings(settings: Settings) -> None:
         "oauth_timeout_seconds": settings.oauth_timeout_seconds,
     }
     _write_json_atomic(path, payload)
+    _SETTINGS_CACHE = settings
+    _SETTINGS_CACHE_KEY = _settings_cache_key(path)
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

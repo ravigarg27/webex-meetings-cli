@@ -6,6 +6,7 @@ from webex_cli.cli import app
 from webex_cli.commands import auth as auth_commands
 from webex_cli.commands import common as common_commands
 from webex_cli.config.credentials import CredentialRecord
+from webex_cli.oauth import OAuthDeviceConfig
 
 
 class _FakeAuthClient:
@@ -63,10 +64,10 @@ def test_profile_auth_isolation_with_cli(monkeypatch) -> None:
     assert runner.invoke(app, ["auth", "login", "--json"]).exit_code == 0
 
     monkeypatch.setenv("WEBEX_TOKEN", "token-work")
-    assert runner.invoke(app, ["auth", "login", "--profile", "work", "--json"]).exit_code == 0
+    assert runner.invoke(app, ["--profile", "work", "auth", "login", "--json"]).exit_code == 0
 
     who_default = runner.invoke(app, ["auth", "whoami", "--json"])
-    who_work = runner.invoke(app, ["auth", "whoami", "--profile", "work", "--json"])
+    who_work = runner.invoke(app, ["--profile", "work", "auth", "whoami", "--json"])
     assert who_default.exit_code == 0
     assert who_work.exit_code == 0
 
@@ -88,7 +89,14 @@ def test_oauth_config_precedence_from_cli_flags(monkeypatch) -> None:
 
     def _capture_config(**kwargs):
         captured.update(kwargs)
-        return object()
+        return OAuthDeviceConfig(
+            client_id=str(kwargs.get("client_id") or "fallback-client"),
+            device_authorize_url=str(kwargs.get("device_authorize_url") or "https://example.test/device/authorize"),
+            token_url=str(kwargs.get("token_url") or "https://example.test/device/token"),
+            scope=str(kwargs.get("scope") or "spark:all"),
+            poll_interval_seconds=int(kwargs.get("poll_interval_seconds") or 5),
+            timeout_seconds=int(kwargs.get("timeout_seconds") or 60),
+        )
 
     monkeypatch.setattr(auth_commands, "resolve_oauth_device_config", _capture_config)
     monkeypatch.setattr(

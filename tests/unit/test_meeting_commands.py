@@ -62,6 +62,20 @@ class _SinglePageMeetingClient:
         )
 
 
+class _MeetingDetailClient:
+    def get_meeting(self, meeting_id):
+        return {
+            "id": meeting_id,
+            "title": "Detail Meeting",
+            "start": "2026-01-03T10:00:00Z",
+            "end": "2026-01-03T11:00:00Z",
+            "webLink": "https://example.test/join",
+            "hasTranscription": True,
+            "hasRecording": True,
+            "hostEmail": "host@example.test",
+        }
+
+
 def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     client = _PagedMeetingClient()
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
@@ -154,3 +168,14 @@ def test_meeting_list_maps_has_transcript_and_has_recording(monkeypatch, capsys)
     assert items["m1"]["has_recording"] is False
     assert items["m2"]["has_transcript"] is False
     assert items["m2"]["has_recording"] is True
+
+
+def test_meeting_get_normalizes_response(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _MeetingDetailClient())
+    meeting_commands.get_meeting(meeting_id="m1", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    data = payload["data"]
+    assert data["meeting_id"] == "m1"
+    assert data["join_url"] == "https://example.test/join"
+    assert data["transcript_hint"] is True
+    assert data["recording_hint"] is True

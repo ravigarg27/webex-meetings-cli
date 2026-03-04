@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 import time
 from dataclasses import dataclass
@@ -348,6 +349,13 @@ class WebexApiClient:
             or normalized_host in {"webexapis.com", "webex.com"}
             or normalized_host.endswith(trusted_suffixes)
         )
+        allow_untrusted = os.environ.get("WEBEX_ALLOW_UNTRUSTED_DOWNLOAD_HOSTS") == "1"
+        if not trusted_host and not allow_untrusted:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Recording download URL host is not trusted. Set WEBEX_ALLOW_UNTRUSTED_DOWNLOAD_HOSTS=1 to override.",
+                details={"download_host": normalized_host},
+            )
         return url, trusted_host
 
     def whoami(self) -> dict[str, Any]:
@@ -460,18 +468,46 @@ class WebexApiClient:
     def get_recording(self, recording_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/v1/recordings/{self._encoded(recording_id)}")
 
-    def list_recordings_for_meeting(self, meeting_id: str) -> list[dict[str, Any]]:
+    def list_recordings_for_meeting(self, meeting_id: str, *, max_items: int = 10000) -> list[dict[str, Any]]:
         all_items: list[dict[str, Any]] = []
         token: str | None = None
+        seen_tokens: set[str] = set()
         while True:
+            previous_count = len(all_items)
             params: dict[str, Any] = {"meetingId": meeting_id, "max": 200}
             if token:
                 params["pageToken"] = token
             payload = self._request_json("GET", "/v1/recordings", params=params)
-            items, token = self._normalize_page(payload)
+            items, next_token = self._normalize_page(payload)
             all_items.extend(items)
-            if not token:
+            if len(all_items) > max_items or (len(all_items) >= max_items and bool(next_token)):
+                raise CliError(
+                    DomainCode.RESULT_SET_TOO_LARGE,
+                    "Result set exceeded max item guard.",
+                    details={"max_items": max_items, "meeting_id": meeting_id, "resume_page_token": next_token},
+                )
+            if not next_token:
                 break
+            if token is not None and next_token == token:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination token repeated with no progress.",
+                    details={"reason": "PAGINATION_CYCLE", "page_token": next_token, "meeting_id": meeting_id},
+                )
+            if next_token in seen_tokens:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination loop detected.",
+                    details={"reason": "PAGINATION_CYCLE", "page_token": next_token, "meeting_id": meeting_id},
+                )
+            if len(all_items) == previous_count and not items:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination made no progress.",
+                    details={"reason": "PAGINATION_NO_PROGRESS", "page_token": next_token, "meeting_id": meeting_id},
+                )
+            seen_tokens.add(next_token)
+            token = next_token
         return all_items
 
     @staticmethod

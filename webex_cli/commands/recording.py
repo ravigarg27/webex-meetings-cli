@@ -60,13 +60,34 @@ def _format_size(size_bytes: int | float | None) -> str:
     return f"{b} B"
 
 
+def _to_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    return None
+
+
 def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _to_int(item.get("durationSeconds") or item.get("duration"))
+    size_bytes = _to_int(item.get("sizeBytes") or item.get("size"))
+    links = item.get("temporaryDirectDownloadLinks")
+    has_temp_links = isinstance(links, dict) and bool(links)
     return {
         "recording_id": item.get("id") or item.get("recordingId"),
         "meeting_id": item.get("meetingId") or item.get("meeting_id"),
+        "occurrence_id": item.get("occurrenceId") or item.get("occurrence_id"),
         "started_at": item.get("createTime") or item.get("startedAt") or item.get("started_at"),
-        "duration": _format_duration(item.get("durationSeconds") or item.get("duration")),
-        "size": _format_size(item.get("sizeBytes") or item.get("size")),
+        "duration_seconds": duration_seconds,
+        "size_bytes": size_bytes,
+        "downloadable": bool(item.get("downloadUrl") or item.get("download_url") or has_temp_links),
     }
 
 

@@ -19,6 +19,7 @@ from webex_cli.commands.common import (
 from webex_cli.config.credentials import CredentialRecord, CredentialStore
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.oauth import (
+    OAuthDeviceConfig,
     OAuthTokenBundle,
     poll_for_device_token,
     resolve_oauth_device_config,
@@ -114,7 +115,7 @@ def _save_pat_profile(profile_key: str, token_value: str) -> tuple[str, list[str
     return backend, warnings
 
 
-def _save_oauth_profile(profile_key: str, bundle: OAuthTokenBundle) -> tuple[str, list[str]]:
+def _save_oauth_profile(profile_key: str, bundle: OAuthTokenBundle, config: OAuthDeviceConfig) -> tuple[str, list[str]]:
     store = CredentialStore(profile=profile_key)
     backend = store.save(
         CredentialRecord(
@@ -125,11 +126,19 @@ def _save_oauth_profile(profile_key: str, bundle: OAuthTokenBundle) -> tuple[str
             expires_at=bundle.expires_at,
             scopes=bundle.scopes,
             invalid_reason=None,
+            oauth_client_id=config.client_id,
+            oauth_device_authorize_url=config.device_authorize_url,
+            oauth_token_url=config.token_url,
+            oauth_scope=config.scope,
+            oauth_poll_interval_seconds=config.poll_interval_seconds,
+            oauth_timeout_seconds=config.timeout_seconds,
         )
     )
     warnings: list[str] = []
     if backend == "file_fallback":
         warnings.append("INSECURE_CREDENTIAL_STORE")
+    if bundle.refresh_token and store.load().refresh_token is None:
+        warnings.append("REFRESH_TOKEN_NOT_PERSISTED")
     return backend, warnings
 
 
@@ -178,12 +187,11 @@ def login(
             help="Disable interactive OAuth prompts. Device flow exits immediately when this flag is set.",
         ),
     ] = False,
-    profile: Annotated[str | None, typer.Option("--profile", help="Use a specific local profile for this command.")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False,
 ) -> None:
     command = "auth login"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             profile_key = resolve_profile()
             has_pat_source = bool(token or os.environ.get("WEBEX_TOKEN") or token_stdin)
             if oauth_device_flow and has_pat_source:
@@ -225,7 +233,7 @@ def login(
                     interval_seconds=int(device["interval_seconds"]),
                 )
                 who = _verify_token_access(bundle.access_token)
-                backend, warnings = _save_oauth_profile(profile_key, bundle)
+                backend, warnings = _save_oauth_profile(profile_key, bundle, config)
                 expires_at = bundle.expires_at
                 scopes = bundle.scopes
             else:
@@ -260,12 +268,11 @@ def login(
 
 @auth_app.command("logout", help="Remove stored credentials from this machine.")
 def logout(
-    profile: Annotated[str | None, typer.Option("--profile", help="Use a specific local profile for this command.")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False,
 ) -> None:
     command = "auth logout"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             profile_key = resolve_profile()
             CredentialStore(profile=profile_key).clear()
             emit_success(command, {"message": "Logged out.", "profile": profile_key}, as_json=json_output)
@@ -277,12 +284,11 @@ def logout(
 
 @auth_app.command("whoami", help="Show details about the currently authenticated user.")
 def whoami(
-    profile: Annotated[str | None, typer.Option("--profile", help="Use a specific local profile for this command.")] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False,
 ) -> None:
     command = "auth whoami"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             profile_key = resolve_profile()
             record = load_credential_record()
             with managed_client(client_factory=build_client) as client:

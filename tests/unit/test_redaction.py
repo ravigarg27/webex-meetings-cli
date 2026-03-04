@@ -6,11 +6,16 @@ from webex_cli.output.json_renderer import emit_error_json
 from webex_cli.utils.redaction import redact_string, redact_value
 
 
-def test_redact_string_hides_bearer_and_long_tokens() -> None:
-    text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 and token abcdefghijklmnopqrstuvwxyz123456"
+def test_redact_string_hides_bearer_and_token_labels() -> None:
+    text = (
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 "
+        "token=abcdefghijklmnopqrstuvwxyz123456 "
+        "request_id=550e8400-e29b-41d4-a716-446655440000"
+    )
     redacted = redact_string(text)
     assert "Bearer [REDACTED]" in redacted
-    assert "abcdefghijklmnopqrstuvwxyz123456" not in redacted
+    assert "token=[REDACTED]" in redacted
+    assert "550e8400-e29b-41d4-a716-446655440000" in redacted
 
 
 def test_redact_value_hides_sensitive_mapping_fields() -> None:

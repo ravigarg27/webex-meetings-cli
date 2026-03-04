@@ -58,6 +58,15 @@ def _normalize_meeting(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_meeting_detail(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_meeting(item)
+    join_url = item.get("webLink") or item.get("joinWebUrl") or item.get("joinUrl")
+    normalized["join_url"] = join_url
+    normalized["transcript_hint"] = bool(item.get("hasTranscription") or item.get("hasTranscript"))
+    normalized["recording_hint"] = bool(item.get("hasRecording"))
+    return normalized
+
+
 @meeting_app.command("list", help="List meetings within a date range or the last N meetings.")
 def list_meetings(
     from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Required unless --last is used."),
@@ -147,7 +156,7 @@ def get_meeting(
             meeting_id = validate_id(meeting_id, "meeting_id")
             with managed_client(client_factory=build_client) as client:
                 item = client.get_meeting(meeting_id)
-            emit_success(command, item, as_json=json_output)
+            emit_success(command, _normalize_meeting_detail(item), as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:

@@ -18,6 +18,7 @@ DEFAULT_PROFILE = "default"
 FALLBACK_POLICY_ENV = "WEBEX_CREDENTIAL_FALLBACK_POLICY"
 FALLBACK_POLICY_DEFAULT = "ci_strict"
 FALLBACK_POLICY_ALLOW = "allow_file_fallback"
+ALLOW_PLAINTEXT_REFRESH_ENV = "WEBEX_ALLOW_PLAINTEXT_REFRESH_TOKEN"
 
 if os.name == "nt":
     import ctypes
@@ -36,6 +37,12 @@ class CredentialRecord:
     expires_at: str | None = None
     scopes: list[str] | None = None
     invalid_reason: str | None = None
+    oauth_client_id: str | None = None
+    oauth_device_authorize_url: str | None = None
+    oauth_token_url: str | None = None
+    oauth_scope: str | None = None
+    oauth_poll_interval_seconds: int | None = None
+    oauth_timeout_seconds: int | None = None
 
 
 class CredentialStore:
@@ -77,7 +84,7 @@ class CredentialStore:
     def _save_fallback(self, token: str) -> None:
         self._save_fallback_bundle(token=token, refresh_token=None)
 
-    def _save_fallback_bundle(self, *, token: str, refresh_token: str | None) -> None:
+    def _save_fallback_bundle(self, *, token: str, refresh_token: str | None) -> bool:
         self._ensure_fallback_allowed()
         cfg = config_dir()
         cfg.mkdir(parents=True, exist_ok=True)
@@ -89,6 +96,7 @@ class CredentialStore:
             except json.JSONDecodeError:
                 payload = {}
         if os.name == "nt":
+            refresh_persisted = False
             try:
                 encrypted = self._dpapi_encrypt(token.encode("utf-8"))
             except Exception as exc:
@@ -106,16 +114,23 @@ class CredentialStore:
                         "Unable to securely store refresh token in Windows fallback store.",
                     ) from exc
                 item["refresh_token_dpapi"] = base64.b64encode(refresh_encrypted).decode("ascii")
+                refresh_persisted = True
             payload[self.profile] = item
         else:
             item = {"token": token}
-            if refresh_token:
+            refresh_persisted = False
+            if refresh_token and self._allow_plaintext_refresh_token():
                 item["refresh_token"] = refresh_token
+                refresh_persisted = True
             payload[self.profile] = item
         self._write_json(path, payload)
+        return refresh_persisted
 
     def _load_fallback(self) -> str | None:
         return self._load_fallback_bundle().get("token")
+
+    def _allow_plaintext_refresh_token(self) -> bool:
+        return self._truthy(os.environ.get(ALLOW_PLAINTEXT_REFRESH_ENV))
 
     def _load_keyring_bundle(self) -> dict[str, str | None]:
         if not self._keyring_available():
@@ -175,6 +190,7 @@ class CredentialStore:
 
     def save(self, record: CredentialRecord) -> str:
         backend = "file_fallback"
+        refresh_persisted = bool(record.refresh_token)
         if self._keyring_available():
             try:
                 import keyring
@@ -191,10 +207,10 @@ class CredentialStore:
             except Exception:
                 self._clear_keyring_credentials_best_effort()
                 self._ensure_fallback_allowed()
-                self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
+                refresh_persisted = self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         else:
             self._ensure_fallback_allowed()
-            self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
+            refresh_persisted = self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         self._save_metadata(
             {
                 "credential_backend": backend,
@@ -203,6 +219,13 @@ class CredentialStore:
                 "scopes": record.scopes or [],
                 "invalid_reason": record.invalid_reason,
                 "fallback_policy": self._fallback_policy(),
+                "refresh_token_persisted": refresh_persisted,
+                "oauth_client_id": record.oauth_client_id,
+                "oauth_device_authorize_url": record.oauth_device_authorize_url,
+                "oauth_token_url": record.oauth_token_url,
+                "oauth_scope": record.oauth_scope,
+                "oauth_poll_interval_seconds": record.oauth_poll_interval_seconds,
+                "oauth_timeout_seconds": record.oauth_timeout_seconds,
             }
         )
         return backend
@@ -239,6 +262,12 @@ class CredentialStore:
         scopes = metadata.get("scopes")
         if not isinstance(scopes, list):
             scopes = []
+        poll_interval = metadata.get("oauth_poll_interval_seconds")
+        if not isinstance(poll_interval, int):
+            poll_interval = None
+        timeout_seconds = metadata.get("oauth_timeout_seconds")
+        if not isinstance(timeout_seconds, int):
+            timeout_seconds = None
         auth_type = str(metadata.get("auth_type") or "pat")
         return CredentialRecord(
             token=token,
@@ -248,6 +277,12 @@ class CredentialStore:
             expires_at=metadata.get("expires_at"),
             scopes=[str(scope) for scope in scopes],
             invalid_reason=metadata.get("invalid_reason"),
+            oauth_client_id=metadata.get("oauth_client_id"),
+            oauth_device_authorize_url=metadata.get("oauth_device_authorize_url"),
+            oauth_token_url=metadata.get("oauth_token_url"),
+            oauth_scope=metadata.get("oauth_scope"),
+            oauth_poll_interval_seconds=poll_interval,
+            oauth_timeout_seconds=timeout_seconds,
         )
 
     def clear(self) -> None:

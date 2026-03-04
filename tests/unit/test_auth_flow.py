@@ -4,7 +4,7 @@ import pytest
 import typer
 
 from webex_cli.commands import auth as auth_commands
-from webex_cli.oauth import OAuthTokenBundle
+from webex_cli.oauth import OAuthDeviceConfig, OAuthTokenBundle
 
 
 class _FakeClient:
@@ -134,7 +134,14 @@ def test_login_oauth_device_flow_success(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         auth_commands,
         "resolve_oauth_device_config",
-        lambda **kwargs: object(),
+        lambda **kwargs: OAuthDeviceConfig(
+            client_id="client-id",
+            device_authorize_url="https://example.test/device/authorize",
+            token_url="https://example.test/device/token",
+            scope="spark:all",
+            poll_interval_seconds=5,
+            timeout_seconds=600,
+        ),
     )
     monkeypatch.setattr(
         auth_commands,

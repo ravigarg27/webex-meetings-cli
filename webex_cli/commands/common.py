@@ -150,7 +150,14 @@ def _refresh_oauth_record(profile_key: str, *, force: bool) -> CredentialRecord:
             )
 
         try:
-            config = resolve_oauth_device_config()
+            config = resolve_oauth_device_config(
+                client_id=current.oauth_client_id,
+                device_authorize_url=current.oauth_device_authorize_url,
+                token_url=current.oauth_token_url,
+                scope=current.oauth_scope,
+                poll_interval_seconds=current.oauth_poll_interval_seconds,
+                timeout_seconds=current.oauth_timeout_seconds,
+            )
             refreshed = refresh_access_token(config, current.refresh_token)
         except CliError as exc:
             if exc.code == DomainCode.AUTH_INVALID:
@@ -166,6 +173,12 @@ def _refresh_oauth_record(profile_key: str, *, force: bool) -> CredentialRecord:
                 expires_at=refreshed.expires_at,
                 scopes=refreshed.scopes,
                 invalid_reason=None,
+                oauth_client_id=current.oauth_client_id,
+                oauth_device_authorize_url=current.oauth_device_authorize_url,
+                oauth_token_url=current.oauth_token_url,
+                oauth_scope=current.oauth_scope,
+                oauth_poll_interval_seconds=current.oauth_poll_interval_seconds,
+                oauth_timeout_seconds=current.oauth_timeout_seconds,
             )
         )
         store.clear_invalid()

@@ -164,7 +164,11 @@ class _AdaptiveThrottle:
 
     def on_success(self) -> None:
         with self._lock:
-            self._delay_seconds = max(0.0, self._delay_seconds - 0.1)
+            if self._delay_seconds <= 0:
+                return
+            self._delay_seconds = self._delay_seconds * 0.8
+            if self._delay_seconds < 0.05:
+                self._delay_seconds = 0.0
 
     def on_throttle_signal(self) -> None:
         with self._lock:
@@ -200,10 +204,12 @@ def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
 def _process_batch_item(
     meeting: dict[str, Any],
     *,
+    client: WebexApiClient,
     api_format: str,
     output_format: str,
     target_dir: Path,
     verify_checksum: bool,
+    overwrite: bool,
     throttle: _AdaptiveThrottle,
 ) -> tuple[dict[str, Any], CliError | None]:
     meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
@@ -219,81 +225,80 @@ def _process_batch_item(
             None,
         )
     try:
-        with managed_client(client_factory=build_client) as worker_client:
-            throttle.wait()
-            status_value, _, _ = _read_transcript_status(worker_client, meeting_id)
-            if status_value != TranscriptStatus.READY:
-                if status_value == TranscriptStatus.FAILED:
-                    terminal_error = CliError(
-                        DomainCode.INTERNAL_ERROR,
-                        "Transcript processing failed.",
-                        details={"meeting_id": meeting_id},
+        throttle.wait()
+        status_value, _, _ = _read_transcript_status(client, meeting_id)
+        if status_value != TranscriptStatus.READY:
+            if status_value == TranscriptStatus.FAILED:
+                failed_state = CliError(
+                    DomainCode.INTERNAL_ERROR,
+                    "Transcript processing failed.",
+                    details={"meeting_id": meeting_id},
+                )
+                return (
+                    {
+                        "meeting_id": meeting_id,
+                        "status": "failed",
+                        "output_path": None,
+                        "error_code": failed_state.code.value,
+                        "error_message": failed_state.message,
+                    },
+                    None,
+                )
+            return (
+                {
+                    "meeting_id": meeting_id,
+                    "status": "skipped",
+                    "output_path": None,
+                    "error_code": None,
+                    "error_message": f"Transcript status is {status_value.value}.",
+                },
+                None,
+            )
+
+        transcript = _resolve_transcript_record(client, meeting_id)
+        transcript_id = str(transcript["id"])
+        content = client.download_transcript(transcript_id, api_format)
+        if verify_checksum:
+            checksum_meta = checksum_from_metadata(transcript)
+            if checksum_meta is not None:
+                algorithm, expected = checksum_meta
+                actual = compute_checksum(content, algorithm)
+                if actual != expected:
+                    mismatch_error = CliError(
+                        DomainCode.DOWNLOAD_FAILED,
+                        "Downloaded transcript checksum mismatch.",
+                        details={
+                            "meeting_id": meeting_id,
+                            "transcript_id": transcript_id,
+                            "algorithm": algorithm,
+                            "expected": expected,
+                            "actual": actual,
+                        },
                     )
                     return (
                         {
                             "meeting_id": meeting_id,
                             "status": "failed",
                             "output_path": None,
-                            "error_code": terminal_error.code.value,
-                            "error_message": terminal_error.message,
+                            "error_code": mismatch_error.code.value,
+                            "error_message": mismatch_error.message,
                         },
-                        terminal_error,
+                        mismatch_error,
                     )
-                return (
-                    {
-                        "meeting_id": meeting_id,
-                        "status": "skipped",
-                        "output_path": None,
-                        "error_code": None,
-                        "error_message": f"Transcript status is {status_value.value}.",
-                    },
-                    None,
-                )
-
-            transcript = _resolve_transcript_record(worker_client, meeting_id)
-            transcript_id = str(transcript["id"])
-            content = worker_client.download_transcript(transcript_id, api_format)
-            if verify_checksum:
-                checksum_meta = checksum_from_metadata(transcript)
-                if checksum_meta is not None:
-                    algorithm, expected = checksum_meta
-                    actual = compute_checksum(content, algorithm)
-                    if actual != expected:
-                        mismatch_error = CliError(
-                            DomainCode.DOWNLOAD_FAILED,
-                            "Downloaded transcript checksum mismatch.",
-                            details={
-                                "meeting_id": meeting_id,
-                                "transcript_id": transcript_id,
-                                "algorithm": algorithm,
-                                "expected": expected,
-                                "actual": actual,
-                            },
-                        )
-                        return (
-                            {
-                                "meeting_id": meeting_id,
-                                "status": "failed",
-                                "output_path": None,
-                                "error_code": mismatch_error.code.value,
-                                "error_message": mismatch_error.message,
-                            },
-                            mismatch_error,
-                        )
-            filename = _batch_filename(meeting, output_format, artifact_id=transcript_id, download_url=None)
-            out_path = target_dir / filename
-            atomic_write_bytes(out_path, content, overwrite=False)
-            throttle.on_success()
-            return (
-                {
-                    "meeting_id": meeting_id,
-                    "status": "success",
-                    "output_path": str(out_path),
-                    "error_code": None,
-                    "error_message": None,
-                },
-                None,
-            )
+        filename = _batch_filename(meeting, output_format, artifact_id=transcript_id, download_url=None)
+        out_path = target_dir / filename
+        atomic_write_bytes(out_path, content, overwrite=overwrite)
+        throttle.on_success()
+        return (
+            {
+                "meeting_id": meeting_id,
+                "status": "success",
+                "output_path": str(out_path),
+                "error_code": None,
+                "error_message": None,
+            },
+            None,
+        )
     except CliError as exc:
         if exc.code in {DomainCode.RATE_LIMITED, DomainCode.UPSTREAM_UNAVAILABLE}:
             throttle.on_throttle_signal()
@@ -526,6 +531,7 @@ def batch_transcripts(
         "--verify-checksum/--no-verify-checksum",
         help="Verify file checksum when upstream metadata provides one.",
     ),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing transcript files."),
     concurrency: int = typer.Option(
         DEFAULT_BATCH_CONCURRENCY,
         "--concurrency",
@@ -576,10 +582,12 @@ def batch_transcripts(
                         inflight[executor.submit(
                             _process_batch_item,
                             meeting,
+                            client=client,
                             api_format=api_format,
                             output_format=output_format,
                             target_dir=target_dir,
                             verify_checksum=verify_checksum,
+                            overwrite=overwrite,
                             throttle=throttle,
                         )] = idx
 

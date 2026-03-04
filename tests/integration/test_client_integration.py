@@ -131,14 +131,31 @@ def test_list_recordings_for_meeting_paginates(monkeypatch) -> None:
     assert [item["id"] for item in items] == ["r1", "r2"]
 
 
+def test_list_recordings_for_meeting_detects_pagination_cycle(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/recordings")
+    responses = [
+        httpx.Response(200, request=request, json={"items": [{"id": "r1"}], "nextPageToken": "n1"}),
+        httpx.Response(200, request=request, json={"items": [{"id": "r2"}], "nextPageToken": "n1"}),
+    ]
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    with pytest.raises(CliError) as exc:
+        client.list_recordings_for_meeting("m1")
+    assert exc.value.code == DomainCode.UPSTREAM_UNAVAILABLE
+
+
 def test_download_recording_falls_back_to_available_quality(monkeypatch) -> None:
     request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
-    request_download = httpx.Request("GET", "https://download.example.test/high.mp4")
+    request_download = httpx.Request("GET", "https://download.webex.com/high.mp4")
     responses = [
         httpx.Response(
             200,
             request=request_meta,
-            json={"id": "r1", "temporaryDirectDownloadLinks": {"high": "https://download.example.test/high.mp4"}},
+            json={"id": "r1", "temporaryDirectDownloadLinks": {"high": "https://download.webex.com/high.mp4"}},
         ),
         httpx.Response(200, request=request_download, content=b"video-bytes"),
     ]
@@ -153,17 +170,17 @@ def test_download_recording_falls_back_to_available_quality(monkeypatch) -> None
     content, quality = client.download_recording("r1", "best")
     assert content == b"video-bytes"
     assert quality == "high"
-    assert seen_urls == ["https://webexapis.com/v1/recordings/r1", "https://download.example.test/high.mp4"]
+    assert seen_urls == ["https://webexapis.com/v1/recordings/r1", "https://download.webex.com/high.mp4"]
 
 
 def test_download_recording_falls_back_from_high_to_best(monkeypatch) -> None:
     request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
-    request_download = httpx.Request("GET", "https://download.example.test/best.mp4")
+    request_download = httpx.Request("GET", "https://download.webex.com/best.mp4")
     responses = [
         httpx.Response(
             200,
             request=request_meta,
-            json={"id": "r1", "temporaryDirectDownloadLinks": {"best": "https://download.example.test/best.mp4"}},
+            json={"id": "r1", "temporaryDirectDownloadLinks": {"best": "https://download.webex.com/best.mp4"}},
         ),
         httpx.Response(200, request=request_download, content=b"video-bytes"),
     ]
@@ -181,12 +198,12 @@ def test_download_recording_falls_back_from_high_to_best(monkeypatch) -> None:
 def test_download_recording_retries_transient_download_failures(monkeypatch) -> None:
     monkeypatch.setattr("webex_cli.client.api.time.sleep", lambda _: None)
     request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
-    request_download = httpx.Request("GET", "https://download.example.test/file.mp4")
+    request_download = httpx.Request("GET", "https://download.webex.com/file.mp4")
     responses = [
         httpx.Response(
             200,
             request=request_meta,
-            json={"id": "r1", "downloadUrl": "https://download.example.test/file.mp4"},
+            json={"id": "r1", "downloadUrl": "https://download.webex.com/file.mp4"},
         ),
         httpx.Response(503, request=request_download, json={"message": "temporary failure"}),
         httpx.Response(200, request=request_download, content=b"ok"),
@@ -203,6 +220,7 @@ def test_download_recording_retries_transient_download_failures(monkeypatch) -> 
 
 
 def test_download_recording_does_not_forward_auth_to_untrusted_host(monkeypatch) -> None:
+    monkeypatch.setenv("WEBEX_ALLOW_UNTRUSTED_DOWNLOAD_HOSTS", "1")
     request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
     request_download = httpx.Request("GET", "https://download.example.test/file.mp4")
     responses = [
@@ -238,6 +256,7 @@ def test_download_recording_blocks_private_host(monkeypatch) -> None:
 
 
 def test_download_recording_blocks_host_resolving_to_private_ip(monkeypatch) -> None:
+    monkeypatch.setenv("WEBEX_ALLOW_UNTRUSTED_DOWNLOAD_HOSTS", "1")
     request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
 
     def fake_request(self, method, url, headers=None, params=None, timeout=None):
@@ -255,6 +274,23 @@ def test_download_recording_blocks_host_resolving_to_private_ip(monkeypatch) -> 
 
     monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
     monkeypatch.setattr("webex_cli.client.api.socket.getaddrinfo", fake_getaddrinfo)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    with pytest.raises(CliError) as exc:
+        client.download_recording("r1", "best")
+    assert exc.value.code == DomainCode.VALIDATION_ERROR
+
+
+def test_download_recording_blocks_untrusted_host_by_default(monkeypatch) -> None:
+    request_meta = httpx.Request("GET", "https://webexapis.com/v1/recordings/r1")
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        return httpx.Response(
+            200,
+            request=request_meta,
+            json={"id": "r1", "downloadUrl": "https://download.example.test/file.mp4"},
+        )
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
     client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
     with pytest.raises(CliError) as exc:
         client.download_recording("r1", "best")

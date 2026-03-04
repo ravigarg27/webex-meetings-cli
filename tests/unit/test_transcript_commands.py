@@ -82,10 +82,12 @@ class _BatchFailFastClient:
             time.sleep(0.05)
             return [{"id": "t1", "status": "ready"}]
         if meeting_id == "m2":
-            return [{"id": "t2", "status": "failed"}]
+            return [{"id": "t2", "status": "ready"}]
         return [{"id": f"t-{meeting_id}", "status": "ready"}]
 
     def download_transcript(self, transcript_id, format_value):
+        if transcript_id == "t2":
+            raise CliError(DomainCode.DOWNLOAD_FAILED, "download failed")
         self.downloaded.append(transcript_id)
         return b"batch-data"
 
@@ -101,6 +103,26 @@ class _BatchThrottleClient:
         self.calls += 1
         if self.calls == 1:
             raise CliError(DomainCode.RATE_LIMITED, "rate limited")
+        return [{"id": f"t-{meeting_id}", "status": "ready"}]
+
+    def download_transcript(self, transcript_id, format_value):
+        return b"ok"
+
+
+class _BatchFailedStatusClient:
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):  # noqa: ANN001
+        return (
+            [
+                {"id": "m1", "start": "2026-01-01T00:00:00Z"},
+                {"id": "m2", "start": "2026-01-01T00:00:00Z"},
+                {"id": "m3", "start": "2026-01-01T00:00:00Z"},
+            ],
+            None,
+        )
+
+    def list_transcripts(self, meeting_id):
+        if meeting_id == "m2":
+            return [{"id": "t2", "status": "failed"}]
         return [{"id": f"t-{meeting_id}", "status": "ready"}]
 
     def download_transcript(self, transcript_id, format_value):
@@ -310,5 +332,54 @@ def test_transcript_batch_applies_adaptive_throttle(monkeypatch, capsys) -> None
         payload = json.loads(capsys.readouterr().out)
         assert "ADAPTIVE_THROTTLE_APPLIED" in payload["warnings"]
         assert any(delay > 0 for delay in sleeps)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_batch_failed_status_is_not_terminal_in_fail_fast(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _BatchFailedStatusClient())
+    tmp_dir = Path(".test_tmp") / f"transcript-batch-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        transcript_commands.batch_transcripts(
+            from_value="2026-01-01",
+            to_value="2026-01-02",
+            download_dir=str(tmp_dir),
+            tz="UTC",
+            format_value="txt",
+            continue_on_error=False,
+            concurrency=2,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        results = {item["meeting_id"]: item for item in payload["data"]["results"]}
+        assert results["m2"]["status"] == "failed"
+        assert "m3" in results
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_batch_builds_client_once(monkeypatch) -> None:
+    build_calls = {"count": 0}
+
+    def _build_client(token=None):
+        build_calls["count"] += 1
+        return _BatchFailedStatusClient()
+
+    monkeypatch.setattr(transcript_commands, "build_client", _build_client)
+    tmp_dir = Path(".test_tmp") / f"transcript-batch-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        transcript_commands.batch_transcripts(
+            from_value="2026-01-01",
+            to_value="2026-01-02",
+            download_dir=str(tmp_dir),
+            tz="UTC",
+            format_value="txt",
+            continue_on_error=True,
+            concurrency=2,
+            json_output=True,
+        )
+        assert build_calls["count"] == 1
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

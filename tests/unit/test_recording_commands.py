@@ -65,6 +65,24 @@ class _SinglePageRecordingClient:
         )
 
 
+class _RecordingListClient:
+    def list_recordings(self, *, from_utc, to_utc, page_size, page_token, host_email=None, meeting_id=None):  # noqa: ANN001
+        return (
+            [
+                {
+                    "id": "r1",
+                    "meetingId": "m1",
+                    "occurrenceId": "occ-1",
+                    "createTime": "2026-01-03T10:00:00Z",
+                    "durationSeconds": 300,
+                    "sizeBytes": 1024,
+                    "downloadUrl": "https://example.test/file.mp4",
+                }
+            ],
+            None,
+        )
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -112,6 +130,27 @@ def test_recording_list_with_page_token_returns_single_page_and_next_token(monke
     assert payload["data"]["items"][0]["recording_id"] == "r9"
     assert payload["data"]["next_page_token"] == "next-recording-token"
     assert client.calls == ["resume-token"]
+
+
+def test_recording_list_uses_spec_schema_fields(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _RecordingListClient())
+    recording_commands.list_recordings(
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        last=None,
+        tz="UTC",
+        page_size=50,
+        page_token=None,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    item = payload["data"]["items"][0]
+    assert item["recording_id"] == "r1"
+    assert item["meeting_id"] == "m1"
+    assert item["occurrence_id"] == "occ-1"
+    assert item["duration_seconds"] == 300
+    assert item["size_bytes"] == 1024
+    assert item["downloadable"] is True
 
 
 def test_recording_status_without_status_defaults_processing(monkeypatch, capsys) -> None:

@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import types
 from pathlib import Path
@@ -225,3 +226,29 @@ def test_keyring_partial_save_falls_back_and_loads_fallback_bundle(monkeypatch) 
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
         credentials_module.sys.modules.pop("keyring", None)
+
+
+def test_non_windows_fallback_does_not_persist_refresh_token_by_default(monkeypatch) -> None:
+    if os.name == "nt":
+        pytest.skip("Non-Windows-only behavior.")
+    tmp_path = Path(".test_tmp") / f"credentials-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
+    monkeypatch.setenv("WEBEX_CREDENTIAL_FALLBACK_POLICY", "allow_file_fallback")
+    monkeypatch.delenv("WEBEX_ALLOW_PLAINTEXT_REFRESH_TOKEN", raising=False)
+    try:
+        store = CredentialStore()
+        store.save(
+            CredentialRecord(
+                token="access-token",
+                auth_type="oauth",
+                refresh_token="refresh-token",
+                expires_at="2026-03-05T00:00:00+00:00",
+                scopes=["spark:all"],
+            )
+        )
+        loaded = store.load()
+        assert loaded.refresh_token is None
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

@@ -71,9 +71,16 @@ def test_resolve_oauth_device_config_precedence(monkeypatch) -> None:
 
 def test_load_credential_record_refreshes_expiring_oauth(monkeypatch) -> None:
     fake_store = _FakeCredentialStore()
+    fake_store.record.oauth_client_id = "persisted-client-id"
+    fake_store.record.oauth_token_url = "https://token.example.test"
+    captured: dict[str, object] = {}
     monkeypatch.setattr(common_commands, "resolve_profile", lambda: "default")
     monkeypatch.setattr(common_commands, "CredentialStore", lambda profile="default": fake_store)
-    monkeypatch.setattr(common_commands, "resolve_oauth_device_config", lambda **kwargs: object())
+    monkeypatch.setattr(
+        common_commands,
+        "resolve_oauth_device_config",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
     monkeypatch.setattr(common_commands, "is_expiring_soon", lambda expires_at: True)
     monkeypatch.setattr(
         common_commands,
@@ -92,6 +99,8 @@ def test_load_credential_record_refreshes_expiring_oauth(monkeypatch) -> None:
     assert fake_store.saved_record is not None
     assert fake_store.saved_record.refresh_token == "new-refresh-token"
     assert fake_store.invalid_reason is None
+    assert captured["client_id"] == "persisted-client-id"
+    assert captured["token_url"] == "https://token.example.test"
 
 
 def test_load_credential_record_marks_invalid_on_refresh_failure(monkeypatch) -> None:

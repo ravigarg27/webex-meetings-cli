@@ -209,49 +209,51 @@ def poll_for_device_token(
 ) -> OAuthTokenBundle:
     started = time.monotonic()
     poll_interval = interval_seconds
-    while True:
-        if (time.monotonic() - started) >= config.timeout_seconds:
-            raise CliError(
-                DomainCode.AUTH_INVALID,
-                "OAuth device flow timed out before authorization completed.",
-                details={"auth_cause": "expired_token"},
-            )
+    with httpx.Client(timeout=30.0) as client:
+        while True:
+            if (time.monotonic() - started) >= config.timeout_seconds:
+                raise CliError(
+                    DomainCode.AUTH_INVALID,
+                    "OAuth device flow timed out before authorization completed.",
+                    details={"auth_cause": "expired_token"},
+                )
 
-        time.sleep(poll_interval)
-        payload = _token_exchange(
-            config,
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": device_code,
-                "client_id": config.client_id,
-            },
-        )
-        oauth_error = payload.get("error")
-        if not oauth_error:
-            return _bundle_from_payload(payload, fallback_scope=config.scope)
-        normalized = str(oauth_error).strip()
-        if normalized == "authorization_pending":
-            continue
-        if normalized == "slow_down":
-            poll_interval = min(MAX_POLL_INTERVAL_SECONDS, poll_interval + 5)
-            continue
-        if normalized == "access_denied":
+            time.sleep(poll_interval)
+            payload = _token_exchange(
+                config,
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": device_code,
+                    "client_id": config.client_id,
+                },
+                client=client,
+            )
+            oauth_error = payload.get("error")
+            if not oauth_error:
+                return _bundle_from_payload(payload, fallback_scope=config.scope)
+            normalized = str(oauth_error).strip()
+            if normalized == "authorization_pending":
+                continue
+            if normalized == "slow_down":
+                poll_interval = min(MAX_POLL_INTERVAL_SECONDS, poll_interval + 5)
+                continue
+            if normalized == "access_denied":
+                raise CliError(
+                    DomainCode.AUTH_INVALID,
+                    "OAuth authorization was denied by the user.",
+                    details={"auth_cause": "access_denied"},
+                )
+            if normalized == "expired_token":
+                raise CliError(
+                    DomainCode.AUTH_INVALID,
+                    "OAuth device code expired. Run `webex auth login --oauth-device-flow` again.",
+                    details={"auth_cause": "expired_token"},
+                )
             raise CliError(
                 DomainCode.AUTH_INVALID,
-                "OAuth authorization was denied by the user.",
-                details={"auth_cause": "access_denied"},
+                "OAuth device flow failed.",
+                details={"auth_cause": "invalid", "oauth_error": normalized},
             )
-        if normalized == "expired_token":
-            raise CliError(
-                DomainCode.AUTH_INVALID,
-                "OAuth device code expired. Run `webex auth login --oauth-device-flow` again.",
-                details={"auth_cause": "expired_token"},
-            )
-        raise CliError(
-            DomainCode.AUTH_INVALID,
-            "OAuth device flow failed.",
-            details={"auth_cause": "invalid", "oauth_error": normalized},
-        )
 
 
 def refresh_access_token(config: OAuthDeviceConfig, refresh_token: str) -> OAuthTokenBundle:
@@ -277,10 +279,18 @@ def refresh_access_token(config: OAuthDeviceConfig, refresh_token: str) -> OAuth
     return _bundle_from_payload(payload, fallback_scope=config.scope)
 
 
-def _token_exchange(config: OAuthDeviceConfig, data: dict[str, str]) -> dict[str, Any]:
+def _token_exchange(
+    config: OAuthDeviceConfig,
+    data: dict[str, str],
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
     try:
-        with httpx.Client(timeout=30.0) as client:
+        if client is not None:
             response = client.post(config.token_url, data=data)
+        else:
+            with httpx.Client(timeout=30.0) as local_client:
+                response = local_client.post(config.token_url, data=data)
     except httpx.HTTPError as exc:
         raise CliError(
             DomainCode.UPSTREAM_UNAVAILABLE,
