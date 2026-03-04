@@ -16,7 +16,7 @@ from webex_cli.runtime import use_profile
 
 
 def _temp_root() -> Path:
-    root = Path(".test_tmp") / f"profiles-{uuid.uuid4().hex}"
+    root = Path("temp_work") / f"profiles-{uuid.uuid4().hex}"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

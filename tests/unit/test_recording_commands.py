@@ -22,6 +22,14 @@ class _DownloadRecordingClient:
         return (b"abc", "medium")
 
 
+class _DownloadRecordingChecksumClient:
+    def list_recordings_for_meeting(self, meeting_id):
+        return [{"id": "r1", "checksum_md5": "900150983cd24fb0d6963f7d28e17f72"}]
+
+    def download_recording(self, recording_id, quality):
+        return (b"abc", "best")
+
+
 class _RecordingStatusNoFieldClient:
     def list_recordings_for_meeting(self, meeting_id):
         return [{"id": "r1"}]
@@ -55,6 +63,7 @@ def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> Non
             out=str(target),
             recording_id=None,
             quality="best",
+            verify_checksum=False,
             overwrite=False,
             json_output=True,
         )
@@ -86,3 +95,51 @@ def test_recording_status_unknown_status_warns(monkeypatch, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["status"] == "failed"
     assert payload["warnings"] == ["UNMAPPED_RECORDING_STATUS"]
+
+
+def test_recording_download_verify_checksum_success(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _DownloadRecordingChecksumClient())
+    tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_dir / "out.mp4"
+    try:
+        recording_commands.download_recording(
+            meeting_id="m1",
+            out=str(target),
+            recording_id=None,
+            quality="best",
+            verify_checksum=True,
+            overwrite=False,
+            profile=None,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_recording_download_verify_checksum_mismatch(monkeypatch) -> None:
+    class _MismatchClient(_DownloadRecordingChecksumClient):
+        def download_recording(self, recording_id, quality):
+            return (b"zzz", "best")
+
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _MismatchClient())
+    tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_dir / "out.mp4"
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            recording_commands.download_recording(
+                meeting_id="m1",
+                out=str(target),
+                recording_id=None,
+                quality="best",
+                verify_checksum=True,
+                overwrite=False,
+                profile=None,
+                json_output=True,
+            )
+        assert exc.value.exit_code == 10
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import hashlib
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,13 +25,15 @@ from webex_cli.commands.common import (
 )
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import TranscriptStatus, map_transcript_status
-from webex_cli.utils.files import atomic_write_bytes, sanitize_filename
+from webex_cli.utils.files import atomic_write_bytes, checksum_from_metadata, compute_checksum, sanitize_filename
 from webex_cli.utils.time import parse_time_range
 
 transcript_app = typer.Typer(help="Download and monitor Webex meeting transcripts.")
 DEFAULT_BATCH_CONCURRENCY = 4
 MIN_BATCH_CONCURRENCY = 1
 MAX_BATCH_CONCURRENCY = 16
+_THROTTLE_BASE_DELAY_SECONDS = 0.5
+_THROTTLE_MAX_DELAY_SECONDS = 5.0
 
 
 def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
@@ -144,7 +147,32 @@ def _read_transcript_status(client: WebexApiClient, meeting_id: str) -> tuple[Tr
     return status, transcript, warnings
 
 
-def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
+class _AdaptiveThrottle:
+    def __init__(self) -> None:
+        self._delay_seconds = 0.0
+        self._lock = threading.Lock()
+        self.applied = False
+
+    def wait(self) -> None:
+        with self._lock:
+            delay = self._delay_seconds
+        if delay > 0:
+            self.applied = True
+            time.sleep(delay)
+
+    def on_success(self) -> None:
+        with self._lock:
+            self._delay_seconds = max(0.0, self._delay_seconds - 0.1)
+
+    def on_throttle_signal(self) -> None:
+        with self._lock:
+            if self._delay_seconds <= 0:
+                self._delay_seconds = _THROTTLE_BASE_DELAY_SECONDS
+            else:
+                self._delay_seconds = min(_THROTTLE_MAX_DELAY_SECONDS, self._delay_seconds * 1.5)
+
+
+def _resolve_transcript_record(client: WebexApiClient, meeting_id: str) -> dict[str, Any]:
     items = client.list_transcripts(meeting_id)
     if not items:
         raise CliError(
@@ -152,14 +180,19 @@ def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
             "No transcript found for meeting.",
             details={"meeting_id": meeting_id},
         )
-    transcript_id = items[0].get("id")
-    if not transcript_id:
+    transcript = items[0]
+    if not transcript.get("id"):
         raise CliError(
             DomainCode.NOT_FOUND,
             "Transcript ID missing from upstream payload.",
             details={"meeting_id": meeting_id},
         )
-    return str(transcript_id)
+    return transcript
+
+
+def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
+    transcript = _resolve_transcript_record(client, meeting_id)
+    return str(transcript["id"])
 
 
 def _process_batch_item(
@@ -168,6 +201,8 @@ def _process_batch_item(
     api_format: str,
     output_format: str,
     target_dir: Path,
+    verify_checksum: bool,
+    throttle: _AdaptiveThrottle,
 ) -> tuple[dict[str, Any], CliError | None]:
     meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
     if not meeting_id:
@@ -183,6 +218,7 @@ def _process_batch_item(
         )
     try:
         with managed_client(client_factory=build_client) as worker_client:
+            throttle.wait()
             status_value, _, _ = _read_transcript_status(worker_client, meeting_id)
             if status_value != TranscriptStatus.READY:
                 if status_value == TranscriptStatus.FAILED:
@@ -212,11 +248,40 @@ def _process_batch_item(
                     None,
                 )
 
-            transcript_id = _resolve_transcript_id(worker_client, meeting_id)
+            transcript = _resolve_transcript_record(worker_client, meeting_id)
+            transcript_id = str(transcript["id"])
             content = worker_client.download_transcript(transcript_id, api_format)
+            if verify_checksum:
+                checksum_meta = checksum_from_metadata(transcript)
+                if checksum_meta is not None:
+                    algorithm, expected = checksum_meta
+                    actual = compute_checksum(content, algorithm)
+                    if actual != expected:
+                        mismatch_error = CliError(
+                            DomainCode.DOWNLOAD_FAILED,
+                            "Downloaded transcript checksum mismatch.",
+                            details={
+                                "meeting_id": meeting_id,
+                                "transcript_id": transcript_id,
+                                "algorithm": algorithm,
+                                "expected": expected,
+                                "actual": actual,
+                            },
+                        )
+                        return (
+                            {
+                                "meeting_id": meeting_id,
+                                "status": "failed",
+                                "output_path": None,
+                                "error_code": mismatch_error.code.value,
+                                "error_message": mismatch_error.message,
+                            },
+                            mismatch_error,
+                        )
             filename = _batch_filename(meeting, output_format, artifact_id=transcript_id, download_url=None)
             out_path = target_dir / filename
             atomic_write_bytes(out_path, content, overwrite=False)
+            throttle.on_success()
             return (
                 {
                     "meeting_id": meeting_id,
@@ -228,6 +293,8 @@ def _process_batch_item(
                 None,
             )
     except CliError as exc:
+        if exc.code in {DomainCode.RATE_LIMITED, DomainCode.UPSTREAM_UNAVAILABLE}:
+            throttle.on_throttle_signal()
         if exc.code == DomainCode.OVERWRITE_CONFLICT:
             return (
                 {
@@ -394,6 +461,11 @@ def download_transcript(
     meeting_id: str,
     format_value: str = typer.Option(..., "--format", help="File format: txt (default), vtt, or json."),
     out: str = typer.Option(..., "--out", help="Output file path."),
+    verify_checksum: bool = typer.Option(
+        False,
+        "--verify-checksum/--no-verify-checksum",
+        help="Verify file checksum when upstream metadata provides one.",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the file if it already exists."),
     profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
@@ -404,14 +476,36 @@ def download_transcript(
             meeting_id = validate_id(meeting_id, "meeting_id")
             api_format, output_format = _normalize_download_format(format_value)
             with managed_client(client_factory=build_client) as client:
-                transcript_id = _resolve_transcript_id(client, meeting_id)
+                transcript = _resolve_transcript_record(client, meeting_id)
+                transcript_id = str(transcript["id"])
                 data_bytes = client.download_transcript(transcript_id, api_format)
+            warnings: list[str] = []
+            if verify_checksum:
+                checksum_meta = checksum_from_metadata(transcript)
+                if checksum_meta is None:
+                    warnings.append("CHECKSUM_METADATA_MISSING")
+                else:
+                    algorithm, expected = checksum_meta
+                    actual = compute_checksum(data_bytes, algorithm)
+                    if actual != expected:
+                        raise CliError(
+                            DomainCode.DOWNLOAD_FAILED,
+                            "Downloaded transcript checksum mismatch.",
+                            details={
+                                "meeting_id": meeting_id,
+                                "transcript_id": transcript_id,
+                                "algorithm": algorithm,
+                                "expected": expected,
+                                "actual": actual,
+                            },
+                        )
             output_path = Path(out)
             atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
             emit_success(
                 command,
                 {"meeting_id": meeting_id, "format": output_format, "output_path": str(output_path)},
                 as_json=json_output,
+                warnings=warnings,
             )
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -430,6 +524,11 @@ def batch_transcripts(
         True,
         "--continue-on-error/--fail-fast",
         help="Continue processing remaining meetings after a failure, or stop immediately.",
+    ),
+    verify_checksum: bool = typer.Option(
+        False,
+        "--verify-checksum/--no-verify-checksum",
+        help="Verify file checksum when upstream metadata provides one.",
     ),
     concurrency: int = typer.Option(
         DEFAULT_BATCH_CONCURRENCY,
@@ -469,6 +568,7 @@ def batch_transcripts(
                 results_by_index: dict[int, dict[str, Any]] = {}
                 first_terminal_error: CliError | None = None
                 next_to_submit = 0
+                throttle = _AdaptiveThrottle()
 
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
                     inflight: dict[Future[tuple[dict[str, Any], CliError | None]], int] = {}
@@ -483,6 +583,8 @@ def batch_transcripts(
                             api_format=api_format,
                             output_format=output_format,
                             target_dir=target_dir,
+                            verify_checksum=verify_checksum,
+                            throttle=throttle,
                         )] = idx
 
                     while next_to_submit < total and len(inflight) < concurrency:
@@ -546,7 +648,7 @@ def batch_transcripts(
                         "results": results,
                     },
                     as_json=json_output,
-                    warnings=warnings,
+                    warnings=warnings + (["ADAPTIVE_THROTTLE_APPLIED"] if throttle.applied else []),
                 )
                 if not continue_mode and first_terminal_error is not None:
                     raise typer.Exit(code=first_terminal_error.exit_code)

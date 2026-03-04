@@ -49,6 +49,14 @@ class _TranscriptFormatClient:
         return b"ok"
 
 
+class _TranscriptChecksumClient:
+    def list_transcripts(self, meeting_id):
+        return [{"id": "t1", "checksum_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}]
+
+    def download_transcript(self, transcript_id, format_value):
+        return b"hello"
+
+
 class _BatchFailFastClient:
     def __init__(self) -> None:
         self.downloaded: list[str] = []
@@ -75,6 +83,23 @@ class _BatchFailFastClient:
     def download_transcript(self, transcript_id, format_value):
         self.downloaded.append(transcript_id)
         return b"batch-data"
+
+
+class _BatchThrottleClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):  # noqa: ANN001
+        return ([{"id": "m1"}, {"id": "m2"}], None)
+
+    def list_transcripts(self, meeting_id):
+        self.calls += 1
+        if self.calls == 1:
+            raise CliError(DomainCode.RATE_LIMITED, "rate limited")
+        return [{"id": f"t-{meeting_id}", "status": "ready"}]
+
+    def download_transcript(self, transcript_id, format_value):
+        return b"ok"
 
 
 def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:
@@ -161,6 +186,52 @@ def test_transcript_download_txt_alias_uses_text_api_format(monkeypatch, capsys)
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def test_transcript_download_verify_checksum_success(monkeypatch, capsys) -> None:
+    client = _TranscriptChecksumClient()
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: client)
+    tmp_dir = Path(".test_tmp") / f"transcript-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_dir / "out.txt"
+    try:
+        transcript_commands.download_transcript(
+            meeting_id="m1",
+            format_value="txt",
+            out=str(out_path),
+            verify_checksum=True,
+            overwrite=False,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert out_path.exists()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_download_verify_checksum_mismatch(monkeypatch) -> None:
+    class _MismatchClient(_TranscriptChecksumClient):
+        def download_transcript(self, transcript_id, format_value):
+            return b"not-hello"
+
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _MismatchClient())
+    tmp_dir = Path(".test_tmp") / f"transcript-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_dir / "out.txt"
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            transcript_commands.download_transcript(
+                meeting_id="m1",
+                format_value="txt",
+                out=str(out_path),
+                verify_checksum=True,
+                overwrite=False,
+                json_output=True,
+            )
+        assert exc.value.exit_code == 10
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_transcript_batch_fail_fast_stops_queue_and_marks_aborted(monkeypatch, capsys) -> None:
     client = _BatchFailFastClient()
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: client)
@@ -203,3 +274,28 @@ def test_transcript_batch_rejects_invalid_concurrency(monkeypatch) -> None:
             json_output=True,
         )
     assert exc.value.exit_code == 2
+
+
+def test_transcript_batch_applies_adaptive_throttle(monkeypatch, capsys) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _BatchThrottleClient())
+    monkeypatch.setattr(transcript_commands.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    tmp_dir = Path(".test_tmp") / f"transcript-batch-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        transcript_commands.batch_transcripts(
+            from_value="2026-01-01",
+            to_value="2026-01-02",
+            download_dir=str(tmp_dir),
+            tz="UTC",
+            format_value="txt",
+            continue_on_error=True,
+            concurrency=1,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert "ADAPTIVE_THROTTLE_APPLIED" in payload["warnings"]
+        assert any(delay > 0 for delay in sleeps)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

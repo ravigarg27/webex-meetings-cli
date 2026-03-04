@@ -8,6 +8,7 @@ from typing import Any
 import typer
 
 from webex_cli.errors import CliError
+from webex_cli.utils.redaction import redact_value
 
 _WARNING_MESSAGES: dict[str, str] = {
     "INSECURE_CREDENTIAL_STORE": (
@@ -22,6 +23,8 @@ _WARNING_MESSAGES: dict[str, str] = {
     "UNMAPPED_RECORDING_STATUS": "Unrecognised recording status received from Webex.",
     "QUALITY_FALLBACK": "Requested recording quality was unavailable; a lower quality was downloaded instead.",
     "MAX_ITEMS_GUARD_HIT": "Result set reached the item limit and may be incomplete.",
+    "CHECKSUM_METADATA_MISSING": "Checksum verification was requested but upstream did not provide checksum metadata.",
+    "ADAPTIVE_THROTTLE_APPLIED": "Adaptive throttling was applied after upstream rate-limit/transient errors.",
 }
 
 # Fields that are internal / noisy and not shown in plain human output.
@@ -130,5 +133,6 @@ def emit_warnings_human(warnings: list[str]) -> None:
 def emit_error_human(error: CliError) -> None:
     typer.echo(f"Error: {error.message}", err=True)
     if error.details:
-        details_str = "  ".join(f"{k}={v}" for k, v in error.details.items())
+        redacted_details = redact_value(error.details)
+        details_str = "  ".join(f"{k}={v}" for k, v in redacted_details.items())
         typer.echo(f"  {details_str}", err=True)

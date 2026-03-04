@@ -20,7 +20,7 @@ from webex_cli.commands.common import (
 )
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import RecordingStatus, map_recording_status
-from webex_cli.utils.files import atomic_write_bytes
+from webex_cli.utils.files import atomic_write_bytes, checksum_from_metadata, compute_checksum
 from webex_cli.utils.time import parse_time_range
 
 recording_app = typer.Typer(help="List and download Webex meeting recordings.")
@@ -248,6 +248,11 @@ def download_recording(
     out: str = typer.Option(..., "--out", help="Output file path."),
     recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
     quality: str = typer.Option("best", "--quality", help="Preferred video quality: best (default), high, or medium. Falls back to the next available quality."),
+    verify_checksum: bool = typer.Option(
+        False,
+        "--verify-checksum/--no-verify-checksum",
+        help="Verify file checksum when upstream metadata provides one.",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the output file if it already exists."),
     profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
@@ -272,9 +277,27 @@ def download_recording(
                 if not selected_id:
                     raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
                 content, actual_quality = client.download_recording(str(selected_id), quality)
+            warnings: list[str] = []
+            if verify_checksum:
+                checksum_meta = checksum_from_metadata(selected)
+                if checksum_meta is None:
+                    warnings.append("CHECKSUM_METADATA_MISSING")
+                else:
+                    algorithm, expected = checksum_meta
+                    actual = compute_checksum(content, algorithm)
+                    if actual != expected:
+                        raise CliError(
+                            DomainCode.DOWNLOAD_FAILED,
+                            "Downloaded recording checksum mismatch.",
+                            details={
+                                "recording_id": str(selected_id),
+                                "algorithm": algorithm,
+                                "expected": expected,
+                                "actual": actual,
+                            },
+                        )
             output_path = Path(out)
             atomic_write_bytes(output_path, content, overwrite=overwrite)
-            warnings: list[str] = []
             if actual_quality != quality:
                 warnings.append("QUALITY_FALLBACK")
             emit_success(

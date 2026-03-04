@@ -26,3 +26,27 @@ def test_fetch_all_pages_raises_when_cap_exceeded() -> None:
     assert exc.value.code == DomainCode.RESULT_SET_TOO_LARGE
     assert "MAX_ITEMS_GUARD_HIT" in exc.value.details.get("warnings", [])
     assert exc.value.details.get("resume_page_token") == "n1"
+
+
+def test_fetch_all_pages_detects_pagination_cycle() -> None:
+    def fetch_page(token):
+        if token is None:
+            return ([{"id": 1}], "same")
+        return ([{"id": 2}], "same")
+
+    with pytest.raises(CliError) as exc:
+        fetch_all_pages(fetch_page)
+    assert exc.value.code == DomainCode.UPSTREAM_UNAVAILABLE
+    assert exc.value.details.get("reason") == "PAGINATION_CYCLE"
+
+
+def test_fetch_all_pages_detects_no_progress_with_next_token() -> None:
+    def fetch_page(token):
+        if token is None:
+            return ([{"id": 1}], "n1")
+        return ([], "n2")
+
+    with pytest.raises(CliError) as exc:
+        fetch_all_pages(fetch_page)
+    assert exc.value.code == DomainCode.UPSTREAM_UNAVAILABLE
+    assert exc.value.details.get("reason") == "PAGINATION_NO_PROGRESS"

@@ -77,3 +77,32 @@ def test_save_and_load_oauth_bundle_in_fallback_store(monkeypatch) -> None:
         assert loaded.scopes == ["spark:all"]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_ci_strict_blocks_file_fallback_in_ci(monkeypatch) -> None:
+    tmp_path = Path(".test_tmp") / f"credentials-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
+    monkeypatch.setenv("CI", "true")
+    try:
+        store = CredentialStore()
+        with pytest.raises(CliError) as exc:
+            store.save(CredentialRecord(token="token123"))
+        assert exc.value.code == DomainCode.VALIDATION_ERROR
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_allow_file_fallback_policy_overrides_ci_strict(monkeypatch) -> None:
+    tmp_path = Path(".test_tmp") / f"credentials-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("WEBEX_CREDENTIAL_FALLBACK_POLICY", "allow_file_fallback")
+    try:
+        backend = CredentialStore().save(CredentialRecord(token="token123"))
+        assert backend == "file_fallback"
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

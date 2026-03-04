@@ -386,7 +386,14 @@ class ProfileStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
-            Path(tmp_path).replace(path)
+            tmp = Path(tmp_path)
+            try:
+                tmp.replace(path)
+            except PermissionError:
+                # Some Windows environments intermittently deny overwrite-in-place.
+                if path.exists():
+                    path.unlink(missing_ok=True)
+                tmp.replace(path)
             if os.name != "nt":
                 os.chmod(path, 0o600)
         finally:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from webex_cli.errors import CliError, DomainCode
 
@@ -37,3 +39,40 @@ def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None
 
 def atomic_write_text(path: Path, text: str, overwrite: bool = False) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), overwrite=overwrite)
+
+
+def checksum_from_metadata(metadata: dict[str, Any]) -> tuple[str, str] | None:
+    # Common key patterns observed in APIs and wrappers.
+    candidates = [
+        ("sha256", metadata.get("checksum_sha256")),
+        ("sha256", metadata.get("sha256")),
+        ("sha256", metadata.get("sha256Checksum")),
+        ("md5", metadata.get("checksum_md5")),
+        ("md5", metadata.get("md5")),
+        ("md5", metadata.get("md5Checksum")),
+    ]
+    nested = metadata.get("checksums")
+    if isinstance(nested, dict):
+        candidates.extend(
+            [
+                ("sha256", nested.get("sha256")),
+                ("md5", nested.get("md5")),
+            ]
+        )
+    for algorithm, value in candidates:
+        if isinstance(value, str) and value.strip():
+            return algorithm, value.strip().lower()
+    return None
+
+
+def compute_checksum(data: bytes, algorithm: str) -> str:
+    algo = algorithm.strip().lower()
+    if algo not in {"sha256", "md5"}:
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "Unsupported checksum algorithm.",
+            details={"algorithm": algorithm},
+        )
+    digest = hashlib.new(algo)
+    digest.update(data)
+    return digest.hexdigest().lower()

@@ -16,15 +16,23 @@ from webex_cli.errors import CliError, DomainCode
 from webex_cli.oauth import is_expiring_soon, refresh_access_token, resolve_oauth_device_config
 from webex_cli.output.human import emit_error_human, emit_success_human, emit_warnings_human
 from webex_cli.output.json_renderer import emit_error_json, emit_success_json
-from webex_cli.runtime import get_current_profile, use_profile
+from webex_cli.runtime import get_current_profile, get_duration_ms, get_request_id, use_profile
 
 _REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
 
 
 def emit_success(command: str, data: object, as_json: bool, warnings: list[str] | None = None) -> None:
+    request_id = get_request_id()
+    duration_ms = get_duration_ms()
     if as_json:
-        emit_success_json(command=command, data=data, warnings=warnings or [])
+        emit_success_json(
+            command=command,
+            data=data,
+            warnings=warnings or [],
+            request_id=request_id,
+            duration_ms=duration_ms,
+        )
     else:
         if warnings:
             emit_warnings_human(warnings)
@@ -32,8 +40,10 @@ def emit_success(command: str, data: object, as_json: bool, warnings: list[str] 
 
 
 def fail(command: str, error: CliError, as_json: bool) -> None:
+    request_id = get_request_id()
+    duration_ms = get_duration_ms()
     if as_json:
-        emit_error_json(command=command, error=error)
+        emit_error_json(command=command, error=error, request_id=request_id, duration_ms=duration_ms)
     else:
         emit_error_human(error)
     raise typer.Exit(code=error.exit_code)
@@ -212,7 +222,11 @@ def fetch_all_pages(
     token = start_token
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
+    seen_tokens: set[str] = set()
+    if token:
+        seen_tokens.add(token)
     while True:
+        previous_count = len(items)
         page_items, next_token = fetch_page(token)
         items.extend(page_items)
         if len(items) > max_items or (len(items) >= max_items and bool(next_token)):
@@ -230,6 +244,25 @@ def fetch_all_pages(
             warnings.append("MAX_ITEMS_GUARD_HIT")
         if not next_token:
             break
+        if token is not None and next_token == token:
+            raise CliError(
+                DomainCode.UPSTREAM_UNAVAILABLE,
+                "Pagination token repeated with no progress.",
+                details={"reason": "PAGINATION_CYCLE", "page_token": next_token},
+            )
+        if next_token in seen_tokens:
+            raise CliError(
+                DomainCode.UPSTREAM_UNAVAILABLE,
+                "Pagination loop detected.",
+                details={"reason": "PAGINATION_CYCLE", "page_token": next_token},
+            )
+        if len(items) == previous_count and not page_items:
+            raise CliError(
+                DomainCode.UPSTREAM_UNAVAILABLE,
+                "Pagination made no progress.",
+                details={"reason": "PAGINATION_NO_PROGRESS", "page_token": next_token},
+            )
+        seen_tokens.add(next_token)
         token = next_token
     return items, warnings
 

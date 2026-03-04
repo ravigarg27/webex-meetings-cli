@@ -9,3 +9,9 @@ def test_cli_version_flag() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.stdout
+
+
+def test_cli_rejects_invalid_log_format() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["--log-format", "xml", "auth", "whoami", "--json"])
+    assert result.exit_code != 0

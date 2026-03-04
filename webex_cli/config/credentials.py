@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
@@ -13,6 +14,9 @@ from webex_cli.errors import CliError, DomainCode
 
 SERVICE_NAME = "webex-cli"
 DEFAULT_PROFILE = "default"
+FALLBACK_POLICY_ENV = "WEBEX_CREDENTIAL_FALLBACK_POLICY"
+FALLBACK_POLICY_DEFAULT = "ci_strict"
+FALLBACK_POLICY_ALLOW = "allow_file_fallback"
 
 if os.name == "nt":
     import ctypes
@@ -73,6 +77,7 @@ class CredentialStore:
         self._save_fallback_bundle(token=token, refresh_token=None)
 
     def _save_fallback_bundle(self, *, token: str, refresh_token: str | None) -> None:
+        self._ensure_fallback_allowed()
         cfg = config_dir()
         cfg.mkdir(parents=True, exist_ok=True)
         path = fallback_credentials_path()
@@ -156,8 +161,10 @@ class CredentialStore:
                         pass
                 backend = "keyring"
             except Exception:
+                self._ensure_fallback_allowed()
                 self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         else:
+            self._ensure_fallback_allowed()
             self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         self._save_metadata(
             {
@@ -166,6 +173,7 @@ class CredentialStore:
                 "expires_at": record.expires_at,
                 "scopes": record.scopes or [],
                 "invalid_reason": record.invalid_reason,
+                "fallback_policy": self._fallback_policy(),
             }
         )
         return backend
@@ -241,6 +249,36 @@ class CredentialStore:
         if "invalid_reason" in metadata:
             metadata.pop("invalid_reason")
             self._save_metadata(metadata)
+
+    @staticmethod
+    def _truthy(value: str | None) -> bool:
+        if not value:
+            return False
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _fallback_policy(self) -> str:
+        return (os.environ.get(FALLBACK_POLICY_ENV) or FALLBACK_POLICY_DEFAULT).strip().lower()
+
+    def _ensure_fallback_allowed(self) -> None:
+        policy = self._fallback_policy()
+        if policy in {"", FALLBACK_POLICY_ALLOW}:
+            return
+        if policy != FALLBACK_POLICY_DEFAULT:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Invalid credential fallback policy.",
+                details={FALLBACK_POLICY_ENV: policy},
+            )
+        in_ci = self._truthy(os.environ.get("CI"))
+        if in_ci:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Secure keyring is required in CI (ci_strict policy).",
+                details={"fallback_policy": policy},
+            )
+        # Local interactive sessions are allowed to proceed with explicit warning.
+        if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            return
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
