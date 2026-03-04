@@ -33,7 +33,7 @@ class _FakeClient:
         return ([{"id": "m1", "title": "Meeting", "start": "2026-01-01T01:00:00Z"}], None)
 
     def get_meeting(self, meeting_id):
-        return {"id": meeting_id, "joinWebUrl": "https://example.test/join", "hasTranscript": True}
+        return {"id": meeting_id, "joinWebUrl": "https://example.test/join", "hasTranscription": True}
 
     def get_meeting_join_url(self, meeting_id):
         return {"joinWebUrl": "https://example.test/join"}
@@ -124,7 +124,7 @@ def test_cli_smoke_live_mode() -> None:
         date_from = os.environ["WEBEX_TEST_FROM"]
         date_to = os.environ["WEBEX_TEST_TO"]
     else:
-        lookback_days = int(os.environ.get("WEBEX_TEST_LAST_DAYS", "5"))
+        lookback_days = int(os.environ.get("WEBEX_TEST_LAST_DAYS", "30"))
         today = datetime.now(timezone.utc).date()
         date_to = today.isoformat()
         date_from = (today - timedelta(days=lookback_days)).isoformat()
@@ -152,6 +152,86 @@ def test_cli_smoke_live_mode() -> None:
         assert last_list.exit_code == 0, last_list.stdout
         last_data = json.loads(last_list.stdout)
         assert len(last_data["data"]["items"]) <= 5
+
+        # Parse meeting list to drive downstream tests data-driven.
+        meeting_items = json.loads(meeting_list.stdout)["data"]["items"]
+
+        def _find_meeting_with(items, field):
+            return next((m["meeting_id"] for m in items if m.get(field)), None)
+
+        first_meeting_id = meeting_items[0]["meeting_id"] if meeting_items else None
+        meeting_id_with_recording = _find_meeting_with(meeting_items, "has_recording")
+        meeting_id_with_transcript = _find_meeting_with(meeting_items, "has_transcript")
+
+        # meeting get
+        if first_meeting_id:
+            meeting_get = runner.invoke(app, ["meeting", "get", first_meeting_id, "--json"])
+            assert meeting_get.exit_code == 0, meeting_get.stdout
+        else:
+            print("[skip] meeting get: no meetings in date range")
+
+        # meeting join-url
+        if first_meeting_id:
+            join_url = runner.invoke(app, ["meeting", "join-url", first_meeting_id, "--json"])
+            assert join_url.exit_code == 0, join_url.stdout
+        else:
+            print("[skip] meeting join-url: no meetings in date range")
+
+        # recording list (independent, same date range)
+        rec_list = runner.invoke(
+            app,
+            ["recording", "list", "--from", date_from, "--to", date_to, "--json"],
+        )
+        assert rec_list.exit_code == 0, rec_list.stdout
+
+        # recording status
+        if meeting_id_with_recording:
+            rec_status = runner.invoke(app, ["recording", "status", meeting_id_with_recording, "--json"])
+            assert rec_status.exit_code == 0, rec_status.stdout
+        else:
+            print("[skip] recording status: no meeting with has_recording=true in date range")
+
+        # recording download
+        if meeting_id_with_recording:
+            rec_out = tmp_dir / "recording.mp4"
+            rec_dl = runner.invoke(
+                app,
+                ["recording", "download", meeting_id_with_recording, "--out", str(rec_out), "--json"],
+            )
+            assert rec_dl.exit_code == 0, rec_dl.stdout
+            assert rec_out.exists() and rec_out.stat().st_size > 0, "recording download produced empty file"
+        else:
+            print("[skip] recording download: no meeting with has_recording=true in date range")
+
+        # transcript status
+        if meeting_id_with_transcript:
+            tx_status = runner.invoke(app, ["transcript", "status", meeting_id_with_transcript, "--json"])
+            assert tx_status.exit_code == 0, tx_status.stdout
+        else:
+            print("[skip] transcript status: no meeting with has_transcript=true in date range")
+
+        # transcript get
+        if meeting_id_with_transcript:
+            tx_get = runner.invoke(
+                app,
+                ["transcript", "get", meeting_id_with_transcript, "--format", "text", "--json"],
+            )
+            assert tx_get.exit_code == 0, tx_get.stdout
+        else:
+            print("[skip] transcript get: no meeting with has_transcript=true in date range")
+
+        # transcript download
+        if meeting_id_with_transcript:
+            tx_out = tmp_dir / "transcript.txt"
+            tx_dl = runner.invoke(
+                app,
+                ["transcript", "download", meeting_id_with_transcript, "--format", "txt", "--out", str(tx_out), "--json"],
+            )
+            assert tx_dl.exit_code == 0, tx_dl.stdout
+            assert tx_out.exists() and tx_out.stat().st_size > 0, "transcript download produced empty file"
+        else:
+            print("[skip] transcript download: no meeting with has_transcript=true in date range")
+
         logout = runner.invoke(app, ["auth", "logout", "--json"])
         assert logout.exit_code == 0, logout.stdout
     finally:

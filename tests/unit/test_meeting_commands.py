@@ -20,6 +20,8 @@ class _PagedMeetingClient:
                         "title": "First",
                         "start": "2026-01-02T10:00:00Z",
                         "end": "2026-01-02T11:00:00Z",
+                        "hasTranscription": True,
+                        "hasRecording": False,
                     }
                 ],
                 "t1",
@@ -31,6 +33,8 @@ class _PagedMeetingClient:
                     "title": "Second",
                     "start": "2026-01-01T10:00:00Z",
                     "end": "2026-01-01T11:00:00Z",
+                    "hasTranscription": False,
+                    "hasRecording": True,
                 }
             ],
             None,
@@ -90,3 +94,23 @@ def test_meeting_list_last_conflicts_with_from_to(monkeypatch) -> None:
             tz="UTC", page_size=50, page_token=None, json_output=True,
         )
     assert exc.value.exit_code != 0
+
+
+def test_meeting_list_maps_has_transcript_and_has_recording(monkeypatch, capsys) -> None:
+    client = _PagedMeetingClient()
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
+    meeting_commands.list_meetings(
+        from_value="2026-01-01",
+        to_value="2026-01-03",
+        last=None,
+        tz="UTC",
+        page_size=50,
+        page_token=None,
+        json_output=True,
+    )
+    output = json.loads(capsys.readouterr().out)
+    items = {i["meeting_id"]: i for i in output["data"]["items"]}
+    assert items["m1"]["has_transcript"] is True
+    assert items["m1"]["has_recording"] is False
+    assert items["m2"]["has_transcript"] is False
+    assert items["m2"]["has_recording"] is True

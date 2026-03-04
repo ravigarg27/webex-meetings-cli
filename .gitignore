@@ -1,4 +1,7 @@
 .pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
+.test_tmp/
 __pycache__/
 *.pyc
 *.pyo
@@ -9,4 +12,3 @@ build/
 *.egg-info/
 .coverage
 coverage.xml
-
