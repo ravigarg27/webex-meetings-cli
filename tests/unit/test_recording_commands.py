@@ -45,6 +45,26 @@ class _UnknownRecordingStatusClient:
         return [{"id": "r1", "status": "future_status"}]
 
 
+class _SinglePageRecordingClient:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    def list_recordings(self, *, from_utc, to_utc, page_size, page_token, host_email=None, meeting_id=None):  # noqa: ANN001
+        self.calls.append(page_token)
+        return (
+            [
+                {
+                    "id": "r9",
+                    "meetingId": "m9",
+                    "createTime": "2026-01-03T10:00:00Z",
+                    "durationSeconds": 300,
+                    "sizeBytes": 1024,
+                }
+            ],
+            "next-recording-token",
+        )
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -73,6 +93,25 @@ def test_recording_download_quality_fallback_warning(monkeypatch, capsys) -> Non
         assert target.exists()
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_recording_list_with_page_token_returns_single_page_and_next_token(monkeypatch, capsys) -> None:
+    client = _SinglePageRecordingClient()
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: client)
+    recording_commands.list_recordings(
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        last=None,
+        tz="UTC",
+        page_size=10,
+        page_token="resume-token",
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["data"]["items"]) == 1
+    assert payload["data"]["items"][0]["recording_id"] == "r9"
+    assert payload["data"]["next_page_token"] == "next-recording-token"
+    assert client.calls == ["resume-token"]
 
 
 def test_recording_status_without_status_defaults_processing(monkeypatch, capsys) -> None:

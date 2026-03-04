@@ -74,7 +74,8 @@ def resolve_oauth_device_config(
     settings = load_settings()
 
     resolved_client_id = client_id or os.environ.get("WEBEX_OAUTH_CLIENT_ID") or settings.oauth_client_id
-    if not resolved_client_id:
+    normalized_client_id = str(resolved_client_id).strip() if resolved_client_id is not None else ""
+    if not normalized_client_id:
         raise CliError(
             DomainCode.VALIDATION_ERROR,
             "OAuth device flow requires a client ID. Set --oauth-client-id, WEBEX_OAUTH_CLIENT_ID, or config.oauth_client_id.",
@@ -115,7 +116,7 @@ def resolve_oauth_device_config(
         )
 
     return OAuthDeviceConfig(
-        client_id=resolved_client_id.strip(),
+        client_id=normalized_client_id,
         device_authorize_url=_validated_https_url(resolved_authorize_url, "oauth_device_authorize_url"),
         token_url=_validated_https_url(resolved_token_url, "oauth_token_url"),
         scope=resolved_scope.strip(),
@@ -154,6 +155,23 @@ def start_device_authorization(config: OAuthDeviceConfig) -> dict[str, Any]:
         ) from exc
 
     payload = _parse_oauth_json(response, operation="device_authorization")
+    oauth_error = str(payload.get("error") or "").strip().lower()
+    if oauth_error:
+        details: dict[str, Any] = {"oauth_error": oauth_error}
+        error_description = payload.get("error_description")
+        if isinstance(error_description, str) and error_description.strip():
+            details["oauth_error_description"] = error_description.strip()
+        if oauth_error in {"invalid_client", "unauthorized_client", "invalid_scope"}:
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "OAuth device authorization rejected due to invalid OAuth configuration.",
+                details=details,
+            )
+        raise CliError(
+            DomainCode.AUTH_INVALID,
+            "OAuth device authorization failed.",
+            details={"auth_cause": "invalid", **details},
+        )
     device_code = str(payload.get("device_code") or "")
     user_code = str(payload.get("user_code") or "")
     verify_uri = str(payload.get("verification_uri") or payload.get("verificationUri") or "")

@@ -142,7 +142,9 @@ def _read_transcript_status(client: WebexApiClient, meeting_id: str) -> tuple[Tr
             if str(raw_status).lower() not in known:
                 warnings.append("UNMAPPED_TRANSCRIPT_STATUS")
     else:
-        status = TranscriptStatus.READY
+        has_download_reference = bool(transcript.get("downloadUrl") or transcript.get("download_url"))
+        status = TranscriptStatus.READY if has_download_reference else TranscriptStatus.PROCESSING
+        warnings.append("TRANSCRIPT_STATUS_MISSING")
     transcript["meeting_id"] = meeting_id
     return status, transcript, warnings
 
@@ -341,12 +343,6 @@ def status(
                 as_json=json_output,
                 warnings=warnings,
             )
-    except typer.Exit:
-        raise
-    except typer.Exit:
-        raise
-    except typer.Exit:
-        raise
     except typer.Exit:
         raise
     except CliError as exc:

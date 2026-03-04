@@ -100,22 +100,32 @@ def list_meetings(
                 )
             from_utc, to_utc = parse_time_range(from_value, to_value, resolve_effective_timezone(tz))
             with managed_client(client_factory=build_client) as client:
-                items, warnings = fetch_all_pages(
-                    lambda token: client.list_meetings(
+                next_page_token: str | None
+                if page_token:
+                    items, next_page_token = client.list_meetings(
                         from_utc=from_utc,
                         to_utc=to_utc,
                         page_size=page_size,
-                        page_token=token,
-                    ),
-                    start_token=page_token,
-                )
+                        page_token=page_token,
+                    )
+                    warnings = []
+                else:
+                    items, warnings = fetch_all_pages(
+                        lambda token: client.list_meetings(
+                            from_utc=from_utc,
+                            to_utc=to_utc,
+                            page_size=page_size,
+                            page_token=token,
+                        ),
+                    )
+                    next_page_token = None
             normalized = [_normalize_meeting(item) for item in items]
             normalized.sort(key=lambda i: i.get("started_at") or "", reverse=True)
             if last is not None:
                 normalized = normalized[:last]
             emit_success(
                 command,
-                {"items": normalized, "next_page_token": None},
+                {"items": normalized, "next_page_token": next_page_token},
                 as_json=json_output,
                 warnings=warnings,
             )

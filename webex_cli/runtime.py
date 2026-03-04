@@ -47,12 +47,20 @@ def get_request_id() -> str:
     return generated
 
 
+def peek_request_id() -> str | None:
+    return _REQUEST_ID.get()
+
+
 def reset_request_id(token: Token[str | None]) -> None:
     _REQUEST_ID.reset(token)
 
 
 def mark_request_start() -> Token[float | None]:
     return _REQUEST_STARTED_MONO.set(time.monotonic())
+
+
+def peek_request_start() -> float | None:
+    return _REQUEST_STARTED_MONO.get()
 
 
 def get_duration_ms() -> int | None:

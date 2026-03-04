@@ -23,7 +23,7 @@ jobs:
         run: pytest -q tests/unit tests/integration tests/e2e
       - name: Run Contract Tests (Phase-Aware Gate)
         env:
-          WEBEX_CONTRACT_GATE_MODE: ${{ (startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/v')) && 'block' || 'warn' }}
+          WEBEX_CONTRACT_GATE_MODE: ${{ ((github.event_name == 'pull_request' && startsWith(github.base_ref, 'release/')) || (github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/release/')) || startsWith(github.ref, 'refs/tags/v')) && 'block' || 'warn' }}
         run: |
           echo "Contract gate mode: ${WEBEX_CONTRACT_GATE_MODE}"
           if [ "${WEBEX_CONTRACT_GATE_MODE}" = "warn" ]; then

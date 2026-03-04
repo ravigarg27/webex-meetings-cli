@@ -4,12 +4,26 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from webex_cli.errors import CliError, DomainCode
 
 INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
+
+
+def replace_file_atomic(src: Path, dest: Path, *, attempts: int = 5, base_delay_seconds: float = 0.05) -> None:
+    if attempts < 1:
+        attempts = 1
+    for attempt in range(attempts):
+        try:
+            src.replace(dest)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == attempts - 1:
+                raise
+            time.sleep(base_delay_seconds * (attempt + 1))
 
 
 def sanitize_filename(value: str) -> str:
@@ -30,7 +44,7 @@ def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        Path(tmp_path).replace(path)
+        replace_file_atomic(Path(tmp_path), path)
     finally:
         tmp = Path(tmp_path)
         if tmp.exists():

@@ -16,6 +16,11 @@ class _TranscriptClientStatusNotFound:
         return []
 
 
+class _TranscriptClientStatusMissing:
+    def list_transcripts(self, meeting_id):
+        return [{"id": "t1"}]
+
+
 class _TranscriptClientWaitReady:
     def __init__(self) -> None:
         self.calls = 0
@@ -107,6 +112,14 @@ def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:
     transcript_commands.status(meeting_id="m1", json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["status"] == "not_found"
+
+
+def test_transcript_status_missing_defaults_to_processing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptClientStatusMissing())
+    transcript_commands.status(meeting_id="m1", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["status"] == "processing"
+    assert "TRANSCRIPT_STATUS_MISSING" in payload["warnings"]
 
 
 def test_transcript_wait_processing_to_ready(monkeypatch, capsys) -> None:

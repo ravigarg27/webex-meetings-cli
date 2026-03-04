@@ -183,3 +183,47 @@ def test_profile_store_migration_rolls_back_on_failure(monkeypatch) -> None:
         assert restored == original_payload
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_profile_write_failure_does_not_delete_existing_registry(monkeypatch) -> None:
+    root = _temp_root()
+    _patch_profile_store(monkeypatch, root)
+    path = root / "profiles.json"
+    original_payload = {"active_profile": "default", "profiles": {"default": {"name": "default"}}}
+    path.write_text(json.dumps(original_payload), encoding="utf-8")
+
+    def _failing_replace(src: Path, dest: Path, *, attempts: int = 5, base_delay_seconds: float = 0.05) -> None:
+        raise PermissionError("simulated replace failure")
+
+    monkeypatch.setattr(profiles_module, "replace_file_atomic", _failing_replace)
+    try:
+        with pytest.raises(PermissionError):
+            ProfileStore._write_json_atomic(path, {"active_profile": "default", "profiles": {}})
+        current_payload = json.loads(path.read_text(encoding="utf-8"))
+        assert current_payload == original_payload
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_delete_profile_does_not_mutate_registry_when_credential_cleanup_fails(monkeypatch) -> None:
+    root = _temp_root()
+    _patch_profile_store(monkeypatch, root)
+
+    class _FailingCredentialStore:
+        def __init__(self, profile: str = "default") -> None:
+            self.profile = profile
+
+        def clear(self) -> None:
+            raise OSError("credential cleanup failed")
+
+    monkeypatch.setattr(credentials_module, "CredentialStore", _FailingCredentialStore)
+    try:
+        store = ProfileStore()
+        store.ensure_initialized()
+        store.create_profile("work", default_tz=None, site_url=None)
+        with pytest.raises(OSError):
+            store.delete_profile("work")
+        keys = {item["key"] for item in store.list_profiles()}
+        assert "work" in keys
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

@@ -1,4 +1,5 @@
 import pytest
+import httpx
 
 from webex_cli.commands import common as common_commands
 from webex_cli.config.credentials import CredentialRecord
@@ -113,3 +114,34 @@ def test_load_credential_record_marks_invalid_on_refresh_failure(monkeypatch) ->
         common_commands.load_credential_record()
     assert exc.value.code == DomainCode.AUTH_INVALID
     assert fake_store.invalid_reason == "revoked"
+
+
+def test_resolve_oauth_device_config_rejects_blank_client_id(monkeypatch) -> None:
+    monkeypatch.setattr(oauth_module, "load_settings", lambda: Settings())
+    with pytest.raises(CliError) as exc:
+        resolve_oauth_device_config(client_id="   ")
+    assert exc.value.code == DomainCode.VALIDATION_ERROR
+
+
+def test_start_device_authorization_maps_invalid_client_as_validation(monkeypatch) -> None:
+    config = oauth_module.OAuthDeviceConfig(
+        client_id="bad-client",
+        device_authorize_url="https://example.test/device/authorize",
+        token_url="https://example.test/device/token",
+        scope="spark:all",
+        poll_interval_seconds=5,
+        timeout_seconds=60,
+    )
+    request = httpx.Request("POST", config.device_authorize_url)
+
+    def _fake_post(self, url, data):
+        return httpx.Response(
+            400,
+            request=request,
+            json={"error": "invalid_client", "error_description": "client not found"},
+        )
+
+    monkeypatch.setattr(httpx.Client, "post", _fake_post, raising=True)
+    with pytest.raises(CliError) as exc:
+        oauth_module.start_device_authorization(config)
+    assert exc.value.code == DomainCode.VALIDATION_ERROR

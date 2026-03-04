@@ -16,7 +16,18 @@ from webex_cli.errors import CliError, DomainCode
 from webex_cli.oauth import is_expiring_soon, refresh_access_token, resolve_oauth_device_config
 from webex_cli.output.human import emit_error_human, emit_success_human, emit_warnings_human
 from webex_cli.output.json_renderer import emit_error_json, emit_success_json
-from webex_cli.runtime import get_current_profile, get_duration_ms, get_request_id, use_profile
+from webex_cli.runtime import (
+    get_current_profile,
+    get_duration_ms,
+    get_request_id,
+    mark_request_start,
+    peek_request_id,
+    peek_request_start,
+    reset_request_id,
+    reset_request_start,
+    set_request_id,
+    use_profile,
+)
 
 _REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
@@ -283,8 +294,20 @@ def validate_id(value: str, name: str = "id") -> str:
 
 @contextmanager
 def profile_scope(profile: str | None) -> Iterator[None]:
-    if profile is None:
-        yield
-        return
-    with use_profile(profile):
-        yield
+    request_id_token = None
+    request_start_token = None
+    if peek_request_id() is None:
+        request_id_token = set_request_id(None)
+    if peek_request_start() is None:
+        request_start_token = mark_request_start()
+    try:
+        if profile is None:
+            yield
+            return
+        with use_profile(profile):
+            yield
+    finally:
+        if request_start_token is not None:
+            reset_request_start(request_start_token)
+        if request_id_token is not None:
+            reset_request_id(request_id_token)

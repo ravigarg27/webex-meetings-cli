@@ -20,6 +20,7 @@ from webex_cli.config.paths import (
 )
 from webex_cli.config.settings import load_settings
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.utils.files import replace_file_atomic
 
 DEFAULT_PROFILE_KEY = "default"
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,50}$")
@@ -292,17 +293,18 @@ class ProfileStore:
                 "Cannot delete the active profile.",
                 details={"profile": name},
             )
-        record = registry.profiles.pop(key, None)
+        record = registry.profiles.get(key)
         if record is None:
             raise CliError(
                 DomainCode.NOT_FOUND,
                 "Profile not found.",
                 details={"profile": name},
             )
-        self._write_registry(registry)
         from webex_cli.config.credentials import CredentialStore  # local import to avoid module cycle
 
         CredentialStore(profile=key).clear()
+        registry.profiles.pop(key, None)
+        self._write_registry(registry)
         return {
             "name": record.name,
             "key": key,
@@ -386,14 +388,7 @@ class ProfileStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
-            tmp = Path(tmp_path)
-            try:
-                tmp.replace(path)
-            except PermissionError:
-                # Some Windows environments intermittently deny overwrite-in-place.
-                if path.exists():
-                    path.unlink(missing_ok=True)
-                tmp.replace(path)
+            replace_file_atomic(Path(tmp_path), path)
             if os.name != "nt":
                 os.chmod(path, 0o600)
         finally:

@@ -9,6 +9,7 @@ from typing import Any
 
 from webex_cli.config.paths import config_dir, settings_path
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.utils.files import replace_file_atomic
 
 
 @dataclass
@@ -132,7 +133,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        Path(tmp_path).replace(path)
+        replace_file_atomic(Path(tmp_path), path)
         if os.name != "nt":
             os.chmod(path, 0o600)
     finally:

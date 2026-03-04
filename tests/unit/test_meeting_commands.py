@@ -41,6 +41,27 @@ class _PagedMeetingClient:
         )
 
 
+class _SinglePageMeetingClient:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):
+        self.calls.append(page_token)
+        return (
+            [
+                {
+                    "id": "m3",
+                    "title": "Single Page",
+                    "start": "2026-01-03T10:00:00Z",
+                    "end": "2026-01-03T11:00:00Z",
+                    "hasTranscription": False,
+                    "hasRecording": False,
+                }
+            ],
+            "next-token",
+        )
+
+
 def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     client = _PagedMeetingClient()
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
@@ -57,6 +78,25 @@ def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     assert len(output["data"]["items"]) == 2
     assert output["data"]["next_page_token"] is None
     assert client.calls == [None, "t1"]
+
+
+def test_meeting_list_with_page_token_returns_single_page_and_next_token(monkeypatch, capsys) -> None:
+    client = _SinglePageMeetingClient()
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
+    meeting_commands.list_meetings(
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        last=None,
+        tz="UTC",
+        page_size=10,
+        page_token="resume-token",
+        json_output=True,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert len(output["data"]["items"]) == 1
+    assert output["data"]["items"][0]["meeting_id"] == "m3"
+    assert output["data"]["next_page_token"] == "next-token"
+    assert client.calls == ["resume-token"]
 
 
 def test_meeting_list_last_truncates_results(monkeypatch, capsys) -> None:

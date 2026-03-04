@@ -11,6 +11,7 @@ from typing import Any
 
 from webex_cli.config.paths import config_dir, fallback_credentials_path
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.utils.files import replace_file_atomic
 
 SERVICE_NAME = "webex-cli"
 DEFAULT_PROFILE = "default"
@@ -116,6 +117,33 @@ class CredentialStore:
     def _load_fallback(self) -> str | None:
         return self._load_fallback_bundle().get("token")
 
+    def _load_keyring_bundle(self) -> dict[str, str | None]:
+        if not self._keyring_available():
+            return {"token": None, "refresh_token": None}
+        try:
+            import keyring
+
+            return {
+                "token": keyring.get_password(SERVICE_NAME, self._keyring_account_access()),
+                "refresh_token": keyring.get_password(SERVICE_NAME, self._keyring_account_refresh()),
+            }
+        except Exception:
+            return {"token": None, "refresh_token": None}
+
+    def _clear_keyring_credentials_best_effort(self) -> None:
+        if not self._keyring_available():
+            return
+        try:
+            import keyring
+        except Exception:
+            return
+
+        for account in (self._keyring_account_access(), self._keyring_account_refresh()):
+            try:
+                keyring.delete_password(SERVICE_NAME, account)
+            except Exception:
+                pass
+
     def _load_fallback_bundle(self) -> dict[str, str | None]:
         path = fallback_credentials_path()
         if not path.exists():
@@ -161,6 +189,7 @@ class CredentialStore:
                         pass
                 backend = "keyring"
             except Exception:
+                self._clear_keyring_credentials_best_effort()
                 self._ensure_fallback_allowed()
                 self._save_fallback_bundle(token=record.token, refresh_token=record.refresh_token)
         else:
@@ -179,27 +208,34 @@ class CredentialStore:
         return backend
 
     def load(self) -> CredentialRecord:
+        metadata = self._load_metadata()
+        preferred_backend = str(metadata.get("credential_backend") or "").strip().lower()
         token: str | None = None
         refresh_token: str | None = None
-        if self._keyring_available():
-            try:
-                import keyring
-
-                token = keyring.get_password(SERVICE_NAME, self._keyring_account_access())
-                refresh_token = keyring.get_password(SERVICE_NAME, self._keyring_account_refresh())
-            except Exception:
+        if preferred_backend == "file_fallback":
+            fallback = self._load_fallback_bundle()
+            token = fallback.get("token")
+            refresh_token = fallback.get("refresh_token")
+        elif preferred_backend == "keyring":
+            keyring_bundle = self._load_keyring_bundle()
+            token = keyring_bundle.get("token")
+            refresh_token = keyring_bundle.get("refresh_token")
+            if not token:
                 fallback = self._load_fallback_bundle()
                 token = fallback.get("token")
                 refresh_token = fallback.get("refresh_token")
         else:
-            fallback = self._load_fallback_bundle()
-            token = fallback.get("token")
-            refresh_token = fallback.get("refresh_token")
+            keyring_bundle = self._load_keyring_bundle()
+            token = keyring_bundle.get("token")
+            refresh_token = keyring_bundle.get("refresh_token")
+            if not token:
+                fallback = self._load_fallback_bundle()
+                token = fallback.get("token")
+                refresh_token = fallback.get("refresh_token")
 
         if not token:
             raise CliError(DomainCode.AUTH_REQUIRED, "No credentials found. Run `webex auth login`.")
 
-        metadata = self._load_metadata()
         scopes = metadata.get("scopes")
         if not isinstance(scopes, list):
             scopes = []
@@ -215,17 +251,7 @@ class CredentialStore:
         )
 
     def clear(self) -> None:
-        if self._keyring_available():
-            try:
-                import keyring
-
-                keyring.delete_password(SERVICE_NAME, self._keyring_account_access())
-            except Exception:
-                pass
-            try:
-                keyring.delete_password(SERVICE_NAME, self._keyring_account_refresh())
-            except Exception:
-                pass
+        self._clear_keyring_credentials_best_effort()
         path = fallback_credentials_path()
         if path.exists():
             try:
@@ -270,15 +296,20 @@ class CredentialStore:
                 details={FALLBACK_POLICY_ENV: policy},
             )
         in_ci = self._truthy(os.environ.get("CI"))
-        if in_ci:
+        is_interactive = (
+            sys.stdin is not None
+            and hasattr(sys.stdin, "isatty")
+            and sys.stdin.isatty()
+            and sys.stdout is not None
+            and hasattr(sys.stdout, "isatty")
+            and sys.stdout.isatty()
+        )
+        if in_ci or not is_interactive:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
-                "Secure keyring is required in CI (ci_strict policy).",
-                details={"fallback_policy": policy},
+                "Secure keyring is required in CI/non-interactive sessions (ci_strict policy).",
+                details={"fallback_policy": policy, "in_ci": in_ci, "interactive": is_interactive},
             )
-        # Local interactive sessions are allowed to proceed with explicit warning.
-        if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
-            return
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -287,7 +318,7 @@ class CredentialStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
-            Path(tmp_path).replace(path)
+            replace_file_atomic(Path(tmp_path), path)
             if os.name != "nt":
                 os.chmod(path, 0o600)
         finally:
