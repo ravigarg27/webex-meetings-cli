@@ -76,6 +76,49 @@ class _MeetingDetailClient:
         }
 
 
+class _MeetingSearchClient:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):
+        self.calls.append(page_token)
+        if page_token is None:
+            return (
+                [
+                    {
+                        "id": "m1",
+                        "title": "Alpha Review",
+                        "start": "2026-01-03T10:00:00Z",
+                        "hostEmail": "a@example.test",
+                        "hasTranscription": True,
+                        "hasRecording": False,
+                    },
+                    {
+                        "id": "m2",
+                        "title": "Beta Sync",
+                        "start": "2026-01-02T10:00:00Z",
+                        "hostEmail": "b@example.test",
+                        "hasTranscription": False,
+                        "hasRecording": True,
+                    },
+                ],
+                "next-token",
+            )
+        return (
+            [
+                {
+                    "id": "m3",
+                    "title": "alpha wrap",
+                    "start": "2026-01-01T10:00:00Z",
+                    "hostEmail": "c@example.test",
+                    "hasTranscription": False,
+                    "hasRecording": True,
+                }
+            ],
+            None,
+        )
+
+
 def test_meeting_list_autofetches_all_pages(monkeypatch, capsys) -> None:
     client = _PagedMeetingClient()
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
@@ -179,3 +222,49 @@ def test_meeting_get_normalizes_response(monkeypatch, capsys) -> None:
     assert data["join_url"] == "https://example.test/join"
     assert data["transcript_hint"] is True
     assert data["recording_hint"] is True
+
+
+def test_meeting_search_applies_query_filter_sort_and_contract(monkeypatch, capsys) -> None:
+    client = _MeetingSearchClient()
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
+    meeting_commands.search_meetings(
+        query="alpha",
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value="has_transcript=true OR meeting_id='m3'",
+        sort_value="started_at:desc",
+        limit=10,
+        max_pages=5,
+        page_token=None,
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["m1", "m3"]
+    assert payload["data"]["items"][0]["resource_type"] == "meeting"
+    assert payload["data"]["items"][0]["title"] == "Alpha Review"
+    assert payload["data"]["items"][0]["snippet"] == "Alpha Review"
+    assert payload["data"]["items"][0]["sort_key"] == "2026-01-03T10:00:00Z"
+    assert payload["data"]["next_page_token"] is None
+    assert client.calls == [None, "next-token"]
+
+
+def test_meeting_search_with_page_token_fetches_single_page(monkeypatch, capsys) -> None:
+    client = _MeetingSearchClient()
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: client)
+    meeting_commands.search_meetings(
+        query="alpha",
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value=None,
+        sort_value=None,
+        limit=10,
+        max_pages=5,
+        page_token="resume-token",
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["m3"]
+    assert payload["data"]["next_page_token"] is None
+    assert client.calls == ["resume-token"]

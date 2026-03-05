@@ -2,7 +2,9 @@ import json
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
+from webex_cli.cli import app
 from webex_cli.commands import auth as auth_commands
 from webex_cli.oauth import OAuthDeviceConfig, OAuthTokenBundle
 
@@ -124,6 +126,17 @@ def test_login_oauth_non_interactive_fails_fast(monkeypatch) -> None:
     with pytest.raises(typer.Exit) as exc:
         auth_commands.login(oauth_device_flow=True, non_interactive=True, oauth_client_id="client-id", json_output=True)
     assert exc.value.exit_code == 2
+
+
+def test_login_oauth_global_non_interactive_fails_fast() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["--non-interactive", "auth", "login", "--oauth-device-flow", "--oauth-client-id", "client-id", "--json"],
+    )
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_login_oauth_device_flow_success(monkeypatch, capsys) -> None:

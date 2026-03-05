@@ -5,12 +5,13 @@ import hashlib
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from webex_cli.capabilities import capability_unavailable
 from webex_cli.client.api import WebexApiClient
 from webex_cli.commands.common import (
     build_client,
@@ -21,19 +22,40 @@ from webex_cli.commands.common import (
     managed_client,
     profile_scope,
     resolve_effective_timezone,
+    resolve_profile,
     validate_id,
 )
+from webex_cli.config.options import resolve_option
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import TranscriptStatus, map_transcript_status
+from webex_cli.search import collect_pages, evaluate_filter, match_query, primary_sort_field, sort_items
+from webex_cli.transcript_index import TranscriptLocalIndex
+from webex_cli.mutations import require_confirmation
 from webex_cli.utils.files import checksum_from_metadata, sanitize_filename
 from webex_cli.utils.time import parse_time_range
 
 transcript_app = typer.Typer(help="Download and monitor Webex meeting transcripts.")
+index_app = typer.Typer(help="Manage the local transcript search index.")
+index_key_app = typer.Typer(help="Manage transcript index encryption keys.")
 DEFAULT_BATCH_CONCURRENCY = 4
 MIN_BATCH_CONCURRENCY = 1
 MAX_BATCH_CONCURRENCY = 16
 _THROTTLE_BASE_DELAY_SECONDS = 0.5
 _THROTTLE_MAX_DELAY_SECONDS = 5.0
+DEFAULT_LAST_LOOKBACK_DAYS = 30
+DEFAULT_SEARCH_LIMIT = 50
+DEFAULT_SEARCH_MAX_PAGES = 5
+SEARCH_PAGE_SIZE = 200
+UNKNOWN_SPEAKER = "(Unknown)"
+TRANSCRIPT_SEARCH_SCHEMA = {
+    "transcript_id": "string",
+    "meeting_id": "string",
+    "title": "string",
+    "started_at": "datetime",
+    "segment_count": "int",
+    "speaker_count": "int",
+    "score": "int",
+}
 
 
 def _status_from_exception(exc: CliError) -> TranscriptStatus | None:
@@ -201,6 +223,295 @@ def _resolve_transcript_id(client: WebexApiClient, meeting_id: str) -> str:
     return str(transcript["id"])
 
 
+def _resolve_search_window(from_value: str | None, to_value: str | None, tz: object | None) -> tuple[str, str]:
+    if not isinstance(from_value, str):
+        from_value = None
+    if not isinstance(to_value, str):
+        to_value = None
+    now = datetime.now(timezone.utc)
+    if from_value is None:
+        from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if to_value is None:
+        to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    effective_tz = tz if isinstance(tz, str) else None
+    return parse_time_range(from_value, to_value, resolve_effective_timezone(effective_tz))
+
+
+def _first_present(item: dict[str, Any], keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        if key in item and item.get(key) is not None:
+            return item.get(key)
+    return None
+
+
+def _parse_number(value: object | None) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _offset_ms(segment: dict[str, Any], *, prefix: str) -> int | None:
+    ms_value = _first_present(segment, (f"{prefix}OffsetMs", f"{prefix}TimeMs", f"{prefix}Ms"))
+    numeric = _parse_number(ms_value)
+    if numeric is not None:
+        return int(numeric)
+
+    sec_value = _first_present(segment, (f"{prefix}OffsetSeconds", f"{prefix}Seconds"))
+    numeric = _parse_number(sec_value)
+    if numeric is not None:
+        return int(numeric * 1000)
+
+    fallback_value = _first_present(segment, (f"{prefix}Offset", prefix))
+    numeric = _parse_number(fallback_value)
+    if numeric is None:
+        return None
+    if abs(numeric) >= 1000:
+        return int(numeric)
+    return int(numeric * 1000)
+
+
+def _normalize_speaker(value: object | None) -> str:
+    if isinstance(value, dict):
+        nested = _first_present(value, ("name", "displayName", "label", "id"))
+        return _normalize_speaker(nested)
+    if value is None:
+        return UNKNOWN_SPEAKER
+    speaker = str(value).strip()
+    return speaker or UNKNOWN_SPEAKER
+
+
+def _extract_segment_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("segments", "items", "results", "utterances"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _load_transcript_segments(client: WebexApiClient, meeting_id: str) -> tuple[str, list[dict[str, Any]]]:
+    transcript = _resolve_transcript_record(client, meeting_id)
+    transcript_id = str(transcript["id"])
+    try:
+        payload = json.loads(client.download_transcript(transcript_id, "json").decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            DomainCode.UPSTREAM_UNAVAILABLE,
+            "Transcript JSON payload was invalid.",
+            details={"meeting_id": meeting_id, "transcript_id": transcript_id},
+        ) from exc
+
+    normalized_segments: list[dict[str, Any]] = []
+    for index, segment in enumerate(_extract_segment_items(payload), start=1):
+        start_offset_ms = _offset_ms(segment, prefix="start")
+        end_offset_ms = _offset_ms(segment, prefix="end")
+        if end_offset_ms is None and start_offset_ms is not None:
+            end_offset_ms = start_offset_ms
+        normalized_segments.append(
+            {
+                "segment_id": str(segment.get("id") or segment.get("segmentId") or f"{transcript_id}:{index}"),
+                "speaker": _normalize_speaker(segment.get("speaker") or segment.get("speakerName")),
+                "start_offset_ms": start_offset_ms,
+                "end_offset_ms": end_offset_ms,
+                "text": str(_first_present(segment, ("text", "content", "transcript", "value")) or ""),
+            }
+        )
+    return transcript_id, normalized_segments
+
+
+def _load_required_transcript_segments(client: WebexApiClient, meeting_id: str) -> tuple[str, list[dict[str, Any]]]:
+    transcript_id, normalized_segments = _load_transcript_segments(client, meeting_id)
+    if normalized_segments:
+        return transcript_id, normalized_segments
+    raise capability_unavailable(
+        "TRANSCRIPT_SEGMENTS_UNAVAILABLE",
+        "Transcript segment metadata is unavailable for this meeting.",
+        details={"meeting_id": meeting_id, "transcript_id": transcript_id},
+    )
+
+
+def _speaker_matches(candidate: str, expected: str | None, *, case_sensitive: bool) -> bool:
+    if expected is None:
+        return True
+    if case_sensitive:
+        return candidate == expected
+    return candidate.lower() == expected.lower()
+
+
+def _segment_overlaps_window(segment: dict[str, Any], *, from_offset_ms: int | None, to_offset_ms: int | None) -> bool:
+    start = segment.get("start_offset_ms")
+    end = segment.get("end_offset_ms")
+    if from_offset_ms is not None and end is not None and end < from_offset_ms:
+        return False
+    if to_offset_ms is not None and start is not None and start > to_offset_ms:
+        return False
+    return True
+
+
+def _transcript_search_result(item: dict[str, Any], *, sort_field: str) -> dict[str, Any]:
+    return {
+        "resource_type": "transcript",
+        "resource_id": item.get("transcript_id"),
+        "title": item.get("title") or "",
+        "snippet": str(item.get("snippet") or ""),
+        "score": int(item.get("score") or 0),
+        "sort_key": item.get(sort_field),
+    }
+
+
+def _local_index() -> TranscriptLocalIndex:
+    return TranscriptLocalIndex(resolve_profile())
+
+
+def _local_index_enabled() -> bool:
+    return bool(
+        resolve_option(
+            None,
+            "WEBEX_SEARCH_LOCAL_INDEX_ENABLED",
+            "search.local_index_enabled",
+            "search_local_index_enabled",
+            default=False,
+            value_type="bool",
+        )
+    )
+
+
+def _local_index_stale_hours() -> int:
+    return int(
+        resolve_option(
+            None,
+            "WEBEX_SEARCH_LOCAL_INDEX_STALE_HOURS",
+            "search.local_index_stale_hours",
+            "search_local_index_stale_hours",
+            default=6,
+            value_type="int",
+        )
+    )
+
+
+def _confirm_local_index_rotation(confirm: bool, yes: bool) -> None:
+    require_confirmation(confirm, yes, command_label="transcript index key rotate")
+    if confirm or yes:
+        return
+    if not typer.confirm("Proceed with transcript index key rotation?"):
+        raise CliError(DomainCode.VALIDATION_ERROR, "Operation cancelled by user.")
+
+
+def _collect_transcript_index_records(
+    client: WebexApiClient,
+    *,
+    from_utc: str,
+    to_utc: str,
+    max_pages: int = DEFAULT_SEARCH_MAX_PAGES,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    meetings, _, warnings = collect_pages(
+        lambda token: client.list_meetings(
+            from_utc=from_utc,
+            to_utc=to_utc,
+            page_size=SEARCH_PAGE_SIZE,
+            page_token=token,
+        ),
+        start_token=None,
+        max_pages=max_pages,
+    )
+    records: list[dict[str, Any]] = []
+    for meeting in meetings:
+        current_meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
+        if not current_meeting_id:
+            continue
+        try:
+            transcript_id, segments = _load_transcript_segments(client, current_meeting_id)
+        except CliError as exc:
+            if exc.code == DomainCode.NOT_FOUND:
+                continue
+            raise
+        records.append(
+            {
+                "transcript_id": transcript_id,
+                "meeting_id": current_meeting_id,
+                "title": str(meeting.get("title") or meeting.get("topic") or current_meeting_id),
+                "started_at": meeting.get("start") or meeting.get("startedAt") or meeting.get("started_at"),
+                "segments": segments,
+            }
+        )
+    return records, warnings
+
+
+def _search_local_index(
+    *,
+    query: str,
+    meeting_id: str | None,
+    speaker: str | None,
+    from_utc: str,
+    to_utc: str,
+    filter_value: str | None,
+    sort_value: str,
+    limit: int,
+    case_sensitive: bool,
+) -> list[dict[str, Any]]:
+    rows = _local_index().search_rows(from_utc=from_utc, to_utc=to_utc, meeting_id=meeting_id)
+    by_transcript: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        bucket = by_transcript.setdefault(
+            row["transcript_id"],
+            {
+                "transcript_id": row["transcript_id"],
+                "meeting_id": row["meeting_id"],
+                "title": row["title"],
+                "started_at": row.get("started_at"),
+                "segments": [],
+            },
+        )
+        bucket["segments"].append(
+            {
+                "segment_id": row["segment_id"],
+                "speaker": row["speaker"] or UNKNOWN_SPEAKER,
+                "start_offset_ms": row["start_offset_ms"],
+                "end_offset_ms": row["end_offset_ms"],
+                "text": row["text"],
+            }
+        )
+
+    matches: list[dict[str, Any]] = []
+    for bucket in by_transcript.values():
+        filtered_segments = [
+            segment
+            for segment in bucket["segments"]
+            if _speaker_matches(str(segment.get("speaker") or UNKNOWN_SPEAKER), speaker, case_sensitive=case_sensitive)
+        ]
+        matched, score, snippet = match_query(
+            query,
+            [segment.get("text") for segment in filtered_segments],
+            case_sensitive=case_sensitive,
+        )
+        if not matched:
+            continue
+        normalized = {
+            "transcript_id": bucket["transcript_id"],
+            "meeting_id": bucket["meeting_id"],
+            "title": bucket["title"],
+            "started_at": bucket.get("started_at"),
+            "segment_count": len(filtered_segments),
+            "speaker_count": len({str(segment.get("speaker") or UNKNOWN_SPEAKER) for segment in filtered_segments}),
+            "score": score,
+            "snippet": snippet,
+        }
+        if not evaluate_filter(filter_value, normalized, TRANSCRIPT_SEARCH_SCHEMA, case_sensitive=case_sensitive):
+            continue
+        matches.append(normalized)
+    return sort_items(matches, sort_value, TRANSCRIPT_SEARCH_SCHEMA, tie_breaker_field="transcript_id")[:limit]
+
+
 def _process_batch_item(
     meeting: dict[str, Any],
     *,
@@ -304,6 +615,275 @@ def _process_batch_item(
             },
             exc,
         )
+
+
+@transcript_app.command("search", help="Search transcript content across meetings.")
+def search_transcripts(
+    query: str = typer.Option(..., "--query", help="Search text."),
+    meeting_id: str | None = typer.Option(None, "--meeting-id", help="Limit search to a single meeting."),
+    speaker: str | None = typer.Option(None, "--speaker", help="Limit search to transcript segments spoken by this speaker."),
+    from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Defaults to 30 days ago."),
+    to_value: str | None = typer.Option(None, "--to", help="End date (YYYY-MM-DD or ISO 8601). Defaults to now."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    filter_value: str | None = typer.Option(None, "--filter", help="Structured filter expression."),
+    sort_value: str | None = typer.Option(None, "--sort", help="Sort fields, e.g. score:desc,started_at:desc."),
+    limit: int = typer.Option(DEFAULT_SEARCH_LIMIT, "--limit", help="Maximum number of rows to return."),
+    max_pages: int = typer.Option(DEFAULT_SEARCH_MAX_PAGES, "--max-pages", help="Maximum number of upstream pages to fetch."),
+    page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Use case-sensitive query and filter evaluation."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "transcript search"
+    try:
+        with profile_scope(None):
+            meeting_id = meeting_id if isinstance(meeting_id, str) else None
+            speaker = speaker if isinstance(speaker, str) else None
+            filter_value = filter_value if isinstance(filter_value, str) else None
+            sort_value = sort_value if isinstance(sort_value, str) else None
+            page_token = page_token if isinstance(page_token, str) else None
+            limit = limit if isinstance(limit, int) and not isinstance(limit, bool) else DEFAULT_SEARCH_LIMIT
+            max_pages = max_pages if isinstance(max_pages, int) and not isinstance(max_pages, bool) else DEFAULT_SEARCH_MAX_PAGES
+            case_sensitive = case_sensitive if isinstance(case_sensitive, bool) else False
+            json_output = json_output if isinstance(json_output, bool) else False
+            if not query.strip():
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--query` must not be empty.")
+            if meeting_id is not None:
+                meeting_id = validate_id(meeting_id, "meeting_id")
+            if limit < 1:
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--limit` must be a positive integer.", details={"limit": limit})
+
+            sort_field = primary_sort_field(sort_value, default_field="score")
+            effective_sort = sort_value if sort_value and sort_value.strip() else "score:desc,started_at:desc"
+            from_utc, to_utc = _resolve_search_window(from_value, to_value, tz)
+            warnings: list[str] = []
+            next_page_token: str | None = None
+            matches: list[dict[str, Any]]
+            try:
+                with managed_client(client_factory=build_client) as client:
+                    local_index = _local_index()
+                    if _local_index_enabled() and local_index.exists() and local_index.is_stale(_local_index_stale_hours()):
+                        records, refresh_warnings = _collect_transcript_index_records(client, from_utc=from_utc, to_utc=to_utc, max_pages=max_pages)
+                        local_index.replace_all(records, from_utc=from_utc, to_utc=to_utc)
+                        warnings.append("LOCAL_INDEX_REFRESHED")
+                        warnings.extend(refresh_warnings)
+
+                    meetings, next_page_token, upstream_warnings = collect_pages(
+                        lambda token: client.list_meetings(
+                            from_utc=from_utc,
+                            to_utc=to_utc,
+                            page_size=SEARCH_PAGE_SIZE,
+                            page_token=token,
+                        ),
+                        start_token=page_token,
+                        max_pages=max_pages,
+                    )
+                    warnings.extend(upstream_warnings)
+
+                    matches = []
+                    for meeting in meetings:
+                        current_meeting_id = str(meeting.get("id") or meeting.get("meetingId") or "")
+                        if not current_meeting_id:
+                            continue
+                        if meeting_id is not None and current_meeting_id != meeting_id:
+                            continue
+
+                        try:
+                            transcript_id, segments = _load_transcript_segments(client, current_meeting_id)
+                        except CliError as exc:
+                            if exc.code == DomainCode.NOT_FOUND:
+                                continue
+                            raise
+
+                        filtered_segments = [
+                            segment
+                            for segment in segments
+                            if _speaker_matches(str(segment.get("speaker") or UNKNOWN_SPEAKER), speaker, case_sensitive=case_sensitive)
+                        ]
+                        matched, score, snippet = match_query(
+                            query,
+                            [segment.get("text") for segment in filtered_segments],
+                            case_sensitive=case_sensitive,
+                        )
+                        if not matched:
+                            continue
+
+                        normalized = {
+                            "transcript_id": transcript_id,
+                            "meeting_id": current_meeting_id,
+                            "title": str(meeting.get("title") or meeting.get("topic") or current_meeting_id),
+                            "started_at": meeting.get("start") or meeting.get("startedAt") or meeting.get("started_at"),
+                            "segment_count": len(filtered_segments),
+                            "speaker_count": len({str(segment.get("speaker") or UNKNOWN_SPEAKER) for segment in filtered_segments}),
+                            "score": score,
+                            "snippet": snippet,
+                        }
+                        if not evaluate_filter(filter_value, normalized, TRANSCRIPT_SEARCH_SCHEMA, case_sensitive=case_sensitive):
+                            continue
+                        matches.append(normalized)
+            except CliError as exc:
+                if exc.code not in {DomainCode.NO_ACCESS, DomainCode.CAPABILITY_ERROR, DomainCode.TRANSCRIPT_DISABLED}:
+                    raise
+                local_index = _local_index()
+                if not local_index.exists():
+                    raise capability_unavailable(
+                        "SEARCH_CAPABILITY_UNAVAILABLE",
+                        "Transcript search is unavailable upstream and no local index is ready.",
+                        details={"fallback_command": "webex transcript index rebuild"},
+                    ) from exc
+                matches = _search_local_index(
+                    query=query,
+                    meeting_id=meeting_id,
+                    speaker=speaker,
+                    from_utc=from_utc,
+                    to_utc=to_utc,
+                    filter_value=filter_value,
+                    sort_value=effective_sort,
+                    limit=limit,
+                    case_sensitive=case_sensitive,
+                )
+                warnings = ["LOCAL_INDEX_FALLBACK"]
+
+            sorted_matches = sort_items(matches, effective_sort, TRANSCRIPT_SEARCH_SCHEMA, tie_breaker_field="transcript_id")
+            emit_success(
+                command,
+                {
+                    "items": [_transcript_search_result(item, sort_field=sort_field) for item in sorted_matches[:limit]],
+                    "next_page_token": next_page_token,
+                },
+                as_json=json_output,
+                warnings=warnings,
+            )
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
+
+
+transcript_app.add_typer(index_app, name="index")
+index_app.add_typer(index_key_app, name="key")
+
+
+@transcript_app.command("segments", help="List normalized transcript segments for a meeting.")
+def segments(
+    meeting_id: str,
+    speaker: str | None = typer.Option(None, "--speaker", help="Limit results to a specific speaker."),
+    contains: str | None = typer.Option(None, "--contains", help="Limit results to segments containing text."),
+    from_offset: float | None = typer.Option(None, "--from-offset", help="Minimum segment offset in seconds."),
+    to_offset: float | None = typer.Option(None, "--to-offset", help="Maximum segment offset in seconds."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Use case-sensitive speaker and text matching."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "transcript segments"
+    try:
+        with profile_scope(None):
+            speaker = speaker if isinstance(speaker, str) else None
+            contains = contains if isinstance(contains, str) else None
+            from_offset = from_offset if isinstance(from_offset, (int, float)) and not isinstance(from_offset, bool) else None
+            to_offset = to_offset if isinstance(to_offset, (int, float)) and not isinstance(to_offset, bool) else None
+            case_sensitive = case_sensitive if isinstance(case_sensitive, bool) else False
+            json_output = json_output if isinstance(json_output, bool) else False
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            if from_offset is not None and from_offset < 0:
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--from-offset` must be non-negative.", details={"from_offset": from_offset})
+            if to_offset is not None and to_offset < 0:
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--to-offset` must be non-negative.", details={"to_offset": to_offset})
+            if from_offset is not None and to_offset is not None and to_offset < from_offset:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--to-offset` must be greater than or equal to `--from-offset`.",
+                    details={"from_offset": from_offset, "to_offset": to_offset},
+                )
+
+            with managed_client(client_factory=build_client) as client:
+                _, all_segments = _load_required_transcript_segments(client, meeting_id)
+
+            from_offset_ms = int(from_offset * 1000) if from_offset is not None else None
+            to_offset_ms = int(to_offset * 1000) if to_offset is not None else None
+            items = [
+                segment
+                for segment in all_segments
+                if _speaker_matches(str(segment.get("speaker") or UNKNOWN_SPEAKER), speaker, case_sensitive=case_sensitive)
+                and _segment_overlaps_window(segment, from_offset_ms=from_offset_ms, to_offset_ms=to_offset_ms)
+                and match_query(contains, [segment.get("text")], case_sensitive=case_sensitive)[0]
+            ]
+            emit_success(command, {"meeting_id": meeting_id, "items": items}, as_json=json_output)
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
+
+
+@transcript_app.command("speakers", help="Summarize speakers present in a meeting transcript.")
+def speakers(
+    meeting_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "transcript speakers"
+    try:
+        with profile_scope(None):
+            json_output = json_output if isinstance(json_output, bool) else False
+            meeting_id = validate_id(meeting_id, "meeting_id")
+            with managed_client(client_factory=build_client) as client:
+                _, all_segments = _load_required_transcript_segments(client, meeting_id)
+
+            aggregates: dict[str, dict[str, int | str]] = {}
+            for segment in all_segments:
+                speaker_name = str(segment.get("speaker") or UNKNOWN_SPEAKER)
+                bucket = aggregates.setdefault(
+                    speaker_name,
+                    {"speaker": speaker_name, "segment_count": 0, "total_duration_ms": 0},
+                )
+                bucket["segment_count"] = int(bucket["segment_count"]) + 1
+                start_offset_ms = segment.get("start_offset_ms")
+                end_offset_ms = segment.get("end_offset_ms")
+                if isinstance(start_offset_ms, int) and isinstance(end_offset_ms, int) and end_offset_ms >= start_offset_ms:
+                    bucket["total_duration_ms"] = int(bucket["total_duration_ms"]) + (end_offset_ms - start_offset_ms)
+
+            items = sorted(aggregates.values(), key=lambda item: str(item["speaker"]).lower())
+            emit_success(command, {"meeting_id": meeting_id, "items": items}, as_json=json_output)
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
+
+
+@index_app.command("rebuild", help="Rebuild the local transcript search index.")
+def rebuild_index(
+    from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Defaults to 30 days ago."),
+    to_value: str | None = typer.Option(None, "--to", help="End date (YYYY-MM-DD or ISO 8601). Defaults to now."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "transcript index rebuild"
+    try:
+        with profile_scope(None):
+            from_utc, to_utc = _resolve_search_window(from_value, to_value, tz)
+            with managed_client(client_factory=build_client) as client:
+                records, warnings = _collect_transcript_index_records(client, from_utc=from_utc, to_utc=to_utc, max_pages=DEFAULT_SEARCH_MAX_PAGES)
+            payload = _local_index().replace_all(records, from_utc=from_utc, to_utc=to_utc)
+            emit_success(command, payload, as_json=json_output, warnings=warnings)
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
+
+
+@index_key_app.command("rotate", help="Rotate the local transcript index encryption key.")
+def rotate_index_key(
+    confirm: bool = typer.Option(False, "--confirm", help="Confirm the rotation without prompting."),
+    yes: bool = typer.Option(False, "--yes", help="Alias for --confirm."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "transcript index key rotate"
+    try:
+        with profile_scope(None):
+            _confirm_local_index_rotation(confirm, yes)
+            payload = _local_index().rotate_key()
+            emit_success(command, payload, as_json=json_output)
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
 
 
 @transcript_app.command("status", help="Check whether a transcript is available for a meeting.")

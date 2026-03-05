@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import sys
 from typing import Annotated
@@ -25,6 +26,7 @@ from webex_cli.oauth import (
     resolve_oauth_device_config,
     start_device_authorization,
 )
+from webex_cli.runtime import get_non_interactive, use_non_interactive
 
 auth_app = typer.Typer(help="Authenticate and manage stored Webex credentials.")
 
@@ -185,13 +187,16 @@ def login(
         typer.Option(
             "--non-interactive",
             help="Disable interactive OAuth prompts. Device flow exits immediately when this flag is set.",
+            hidden=True,
         ),
     ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit output as a JSON envelope.")] = False,
 ) -> None:
     command = "auth login"
+    non_interactive_mode = non_interactive or get_non_interactive()
+    non_interactive_scope = use_non_interactive(non_interactive_mode) if non_interactive_mode else nullcontext()
     try:
-        with profile_scope(None):
+        with profile_scope(None), non_interactive_scope:
             profile_key = resolve_profile()
             has_pat_source = bool(token or os.environ.get("WEBEX_TOKEN") or token_stdin)
             if oauth_device_flow and has_pat_source:
@@ -208,7 +213,7 @@ def login(
             scopes: list[str] = []
             if oauth_device_flow:
                 auth_method = "oauth_device_flow"
-                if non_interactive:
+                if non_interactive_mode:
                     raise CliError(
                         DomainCode.VALIDATION_ERROR,
                         "OAuth device flow cannot run in non-interactive mode.",

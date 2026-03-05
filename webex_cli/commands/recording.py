@@ -20,10 +20,26 @@ from webex_cli.commands.common import (
 )
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import RecordingStatus, map_recording_status
+from webex_cli.search import collect_pages, evaluate_filter, match_query, primary_sort_field, sort_items
 from webex_cli.utils.files import checksum_from_metadata
 from webex_cli.utils.time import parse_time_range
 
 recording_app = typer.Typer(help="List and download Webex meeting recordings.")
+DEFAULT_LAST_LOOKBACK_DAYS = 30
+DEFAULT_SEARCH_LIMIT = 50
+DEFAULT_SEARCH_MAX_PAGES = 5
+SEARCH_PAGE_SIZE = 200
+RECORDING_SEARCH_SCHEMA = {
+    "recording_id": "string",
+    "meeting_id": "string",
+    "occurrence_id": "string",
+    "title": "string",
+    "started_at": "datetime",
+    "duration_seconds": "int",
+    "size_bytes": "int",
+    "downloadable": "bool",
+    "score": "int",
+}
 
 
 def _status_from_exception(exc: CliError) -> RecordingStatus | None:
@@ -101,6 +117,45 @@ def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_recording_search_item(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_recording(item)
+    normalized["title"] = str(item.get("topic") or item.get("title") or normalized["recording_id"] or "")
+    return normalized
+
+
+def _resolve_search_window(from_value: str | None, to_value: str | None, tz: object | None) -> tuple[str, str]:
+    if not isinstance(from_value, str):
+        from_value = None
+    if not isinstance(to_value, str):
+        to_value = None
+    now = datetime.now(timezone.utc)
+    if from_value is None:
+        from_value = (now - timedelta(days=DEFAULT_LAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if to_value is None:
+        to_value = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    effective_tz = tz if isinstance(tz, str) else None
+    return parse_time_range(from_value, to_value, resolve_effective_timezone(effective_tz))
+
+
+def _recording_search_text(item: dict[str, Any]) -> list[object]:
+    return [
+        item.get("title"),
+        item.get("recording_id"),
+        item.get("meeting_id"),
+    ]
+
+
+def _recording_search_result(item: dict[str, Any], *, snippet: str, score: int, sort_field: str) -> dict[str, Any]:
+    return {
+        "resource_type": "recording",
+        "resource_id": item.get("recording_id"),
+        "title": item.get("title") or "",
+        "snippet": snippet,
+        "score": score,
+        "sort_key": item.get(sort_field),
+    }
+
+
 def _status_from_recording_item(item: dict[str, Any]) -> tuple[RecordingStatus, list[str]]:
     warnings: list[str] = []
     raw_status = item.get("status") or item.get("state")
@@ -151,9 +206,6 @@ def _resolve_recording(client: WebexApiClient, meeting_id: str, recording_id: st
             details={"meeting_id": meeting_id, "count": len(records)},
         )
     return records[0]
-
-
-DEFAULT_LAST_LOOKBACK_DAYS = 30
 
 
 @recording_app.command("list", help="List recordings within a date range or the last N recordings.")
@@ -223,6 +275,78 @@ def list_recordings(
             emit_success(
                 command,
                 {"items": normalized, "next_page_token": next_page_token},
+                as_json=json_output,
+                warnings=warnings,
+            )
+    except CliError as exc:
+        fail(command, exc, as_json=json_output)
+    except Exception as exc:
+        handle_unexpected(command, as_json=json_output, exc=exc)
+
+
+@recording_app.command("search", help="Search recordings by text, filters, and sorting.")
+def search_recordings(
+    query: str = typer.Option(..., "--query", help="Search text."),
+    from_value: str | None = typer.Option(None, "--from", help="Start date (YYYY-MM-DD or ISO 8601). Defaults to 30 days ago."),
+    to_value: str | None = typer.Option(None, "--to", help="End date (YYYY-MM-DD or ISO 8601). Defaults to now."),
+    tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
+    filter_value: str | None = typer.Option(None, "--filter", help="Structured filter expression."),
+    sort_value: str | None = typer.Option(None, "--sort", help="Sort fields, e.g. score:desc,started_at:desc."),
+    limit: int = typer.Option(DEFAULT_SEARCH_LIMIT, "--limit", help="Maximum number of rows to return."),
+    max_pages: int = typer.Option(DEFAULT_SEARCH_MAX_PAGES, "--max-pages", help="Maximum number of upstream pages to fetch."),
+    page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Use case-sensitive query and filter evaluation."),
+    json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
+) -> None:
+    command = "recording search"
+    try:
+        with profile_scope(None):
+            filter_value = filter_value if isinstance(filter_value, str) else None
+            sort_value = sort_value if isinstance(sort_value, str) else None
+            page_token = page_token if isinstance(page_token, str) else None
+            limit = limit if isinstance(limit, int) and not isinstance(limit, bool) else DEFAULT_SEARCH_LIMIT
+            max_pages = max_pages if isinstance(max_pages, int) and not isinstance(max_pages, bool) else DEFAULT_SEARCH_MAX_PAGES
+            case_sensitive = case_sensitive if isinstance(case_sensitive, bool) else False
+            json_output = json_output if isinstance(json_output, bool) else False
+            if not query.strip():
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--query` must not be empty.")
+            if limit < 1:
+                raise CliError(DomainCode.VALIDATION_ERROR, "`--limit` must be a positive integer.", details={"limit": limit})
+            sort_field = primary_sort_field(sort_value, default_field="score")
+            effective_sort = sort_value if sort_value and sort_value.strip() else "score:desc,started_at:desc"
+            from_utc, to_utc = _resolve_search_window(from_value, to_value, tz)
+            with managed_client(client_factory=build_client) as client:
+                items, next_page_token, warnings = collect_pages(
+                    lambda token: client.list_recordings(
+                        from_utc=from_utc,
+                        to_utc=to_utc,
+                        page_size=SEARCH_PAGE_SIZE,
+                        page_token=token,
+                    ),
+                    start_token=page_token,
+                    max_pages=max_pages,
+                )
+
+            matches: list[dict[str, Any]] = []
+            for item in items:
+                normalized = _normalize_recording_search_item(item)
+                matched, score, snippet = match_query(query, _recording_search_text(normalized), case_sensitive=case_sensitive)
+                if not matched:
+                    continue
+                normalized["score"] = score
+                if not evaluate_filter(filter_value, normalized, RECORDING_SEARCH_SCHEMA, case_sensitive=case_sensitive):
+                    continue
+                normalized["snippet"] = snippet
+                matches.append(normalized)
+
+            sorted_matches = sort_items(matches, effective_sort, RECORDING_SEARCH_SCHEMA, tie_breaker_field="recording_id")
+            result_items = [
+                _recording_search_result(item, snippet=str(item.get("snippet") or ""), score=int(item.get("score") or 0), sort_field=sort_field)
+                for item in sorted_matches[:limit]
+            ]
+            emit_success(
+                command,
+                {"items": result_items, "next_page_token": next_page_token},
                 as_json=json_output,
                 warnings=warnings,
             )

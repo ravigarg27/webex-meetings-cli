@@ -168,6 +168,63 @@ class _BatchDeterministicFailFastClient:
         output_path.write_bytes(b"ok")
 
 
+class _TranscriptSearchClient:
+    def __init__(self) -> None:
+        self.meeting_calls: list[str | None] = []
+        self.download_calls: list[str] = []
+
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):  # noqa: ANN001
+        self.meeting_calls.append(page_token)
+        if page_token is None:
+            return (
+                [
+                    {"id": "m1", "title": "Alpha Sync", "start": "2026-01-03T10:00:00Z"},
+                    {"id": "m2", "title": "Budget Review", "start": "2026-01-02T10:00:00Z"},
+                ],
+                "next-token",
+            )
+        return (
+            [
+                {"id": "m3", "title": "Project Recap", "start": "2026-01-01T10:00:00Z"},
+            ],
+            None,
+        )
+
+    def list_transcripts(self, meeting_id):
+        return [{"id": f"t-{meeting_id}", "status": "ready"}]
+
+    def download_transcript(self, transcript_id, format_value):
+        self.download_calls.append(transcript_id)
+        payloads = {
+            "t-m1": {
+                "segments": [
+                    {"id": "s1", "speaker": "Alice", "startOffsetMs": 0, "endOffsetMs": 1500, "text": "Alpha kickoff"},
+                    {"id": "s2", "speaker": "Bob", "startOffsetMs": 1500, "endOffsetMs": 3000, "text": "Budget review"},
+                ]
+            },
+            "t-m2": {
+                "segments": [
+                    {"id": "s3", "speaker": "Bob", "startOffsetMs": 0, "endOffsetMs": 1500, "text": "No alpha here"},
+                ]
+            },
+            "t-m3": {
+                "segments": [
+                    {"id": "s4", "speaker": "Alice", "startOffsetMs": 0, "endOffsetMs": 2000, "text": "alpha follow up"},
+                    {"id": "s5", "startOffsetMs": 2500, "endOffsetMs": 3000, "text": "Unattributed note"},
+                ]
+            },
+        }
+        return json.dumps(payloads[transcript_id]).encode("utf-8")
+
+
+class _TranscriptSegmentsUnavailableClient:
+    def list_transcripts(self, meeting_id):
+        return [{"id": "t1", "status": "ready"}]
+
+    def download_transcript(self, transcript_id, format_value):
+        return json.dumps({"items": []}).encode("utf-8")
+
+
 def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptClientStatusNotFound())
     transcript_commands.status(meeting_id="m1", json_output=True)
@@ -313,6 +370,107 @@ def test_transcript_download_verify_checksum_mismatch(monkeypatch) -> None:
         assert exc.value.exit_code == 10
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_segments_filters_and_normalizes(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptSearchClient())
+    transcript_commands.segments(
+        meeting_id="m1",
+        speaker="alice",
+        contains="alpha",
+        from_offset=0,
+        to_offset=2,
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["items"] == [
+        {
+            "segment_id": "s1",
+            "speaker": "Alice",
+            "start_offset_ms": 0,
+            "end_offset_ms": 1500,
+            "text": "Alpha kickoff",
+        }
+    ]
+
+
+def test_transcript_speakers_aggregates_deterministically(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptSearchClient())
+    transcript_commands.speakers(meeting_id="m3", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["items"] == [
+        {"speaker": "(Unknown)", "segment_count": 1, "total_duration_ms": 500},
+        {"speaker": "Alice", "segment_count": 1, "total_duration_ms": 2000},
+    ]
+
+
+def test_transcript_segments_missing_metadata_returns_capability_error(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptSegmentsUnavailableClient())
+    with pytest.raises(typer.Exit) as exc:
+        transcript_commands.segments(meeting_id="m1", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert exc.value.exit_code == 5
+    assert payload["error"]["code"] == "TRANSCRIPT_SEGMENTS_UNAVAILABLE"
+
+
+def test_transcript_speakers_missing_metadata_returns_capability_error(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _TranscriptSegmentsUnavailableClient())
+    with pytest.raises(typer.Exit) as exc:
+        transcript_commands.speakers(meeting_id="m1", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert exc.value.exit_code == 5
+    assert payload["error"]["code"] == "TRANSCRIPT_SEGMENTS_UNAVAILABLE"
+
+
+def test_transcript_search_applies_query_filter_sort_and_contract(monkeypatch, capsys) -> None:
+    client = _TranscriptSearchClient()
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: client)
+    transcript_commands.search_transcripts(
+        query="alpha",
+        meeting_id=None,
+        speaker="Alice",
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value="segment_count>=1",
+        sort_value="started_at:desc",
+        limit=10,
+        max_pages=5,
+        page_token=None,
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["t-m1", "t-m3"]
+    assert payload["data"]["items"][0]["resource_type"] == "transcript"
+    assert payload["data"]["items"][0]["title"] == "Alpha Sync"
+    assert payload["data"]["items"][0]["snippet"] == "Alpha kickoff"
+    assert payload["data"]["items"][0]["sort_key"] == "2026-01-03T10:00:00Z"
+    assert payload["data"]["next_page_token"] is None
+    assert client.meeting_calls == [None, "next-token"]
+
+
+def test_transcript_search_with_page_token_fetches_single_page(monkeypatch, capsys) -> None:
+    client = _TranscriptSearchClient()
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: client)
+    transcript_commands.search_transcripts(
+        query="alpha",
+        meeting_id=None,
+        speaker=None,
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value=None,
+        sort_value=None,
+        limit=10,
+        max_pages=5,
+        page_token="resume-token",
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["t-m3"]
+    assert payload["data"]["next_page_token"] is None
+    assert client.meeting_calls == ["resume-token"]
 
 
 def test_transcript_batch_fail_fast_stops_queue_and_marks_aborted(monkeypatch, capsys) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 
 from webex_cli.config.paths import config_dir, fallback_credentials_path
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.runtime import get_non_interactive
 from webex_cli.utils.files import write_json_atomic
 
 SERVICE_NAME = "webex-cli"
@@ -330,6 +331,7 @@ class CredentialStore:
                 details={FALLBACK_POLICY_ENV: policy},
             )
         in_ci = self._truthy(os.environ.get("CI"))
+        explicit_non_interactive = get_non_interactive()
         is_interactive = (
             sys.stdin is not None
             and hasattr(sys.stdin, "isatty")
@@ -338,11 +340,16 @@ class CredentialStore:
             and hasattr(sys.stdout, "isatty")
             and sys.stdout.isatty()
         )
-        if in_ci or not is_interactive:
+        if in_ci or explicit_non_interactive or not is_interactive:
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
                 "Secure keyring is required in CI/non-interactive sessions (ci_strict policy).",
-                details={"fallback_policy": policy, "in_ci": in_ci, "interactive": is_interactive},
+                details={
+                    "fallback_policy": policy,
+                    "in_ci": in_ci,
+                    "interactive": is_interactive,
+                    "explicit_non_interactive": explicit_non_interactive,
+                },
             )
 
     @staticmethod

@@ -37,6 +37,50 @@ _REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
 logger = get_logger(__name__)
 
+_LISTEN_COMMAND_PREFIXES = (
+    "event listen",
+    "event ingress",
+)
+_MUTATION_COMMAND_PREFIXES = (
+    "auth login",
+    "auth logout",
+    "profile create",
+    "profile use",
+    "profile delete",
+    "meeting create",
+    "meeting update",
+    "meeting cancel",
+    "meeting invitee add",
+    "meeting invitee remove",
+    "meeting template apply",
+    "meeting recurrence create",
+    "meeting recurrence update",
+    "meeting recurrence cancel",
+    "transcript index rebuild",
+    "transcript index key rotate",
+    "event dlq purge",
+    "event replay",
+    "event dlq replay",
+    "event checkpoint reset",
+)
+
+
+def _command_mode(command: str) -> str:
+    normalized = " ".join(command.strip().split()).lower()
+    if any(normalized.startswith(prefix) for prefix in _LISTEN_COMMAND_PREFIXES):
+        return "listen"
+    if any(normalized.startswith(prefix) for prefix in _MUTATION_COMMAND_PREFIXES):
+        return "mutation"
+    return "read"
+
+
+def _meta_profile() -> str | None:
+    preferred = get_current_profile() or os.environ.get("WEBEX_PROFILE")
+    try:
+        return ProfileStore().resolve(preferred=preferred)
+    except CliError:
+        return preferred or None
+
 
 def emit_success(command: str, data: object, as_json: bool, warnings: list[str] | None = None) -> None:
     request_id = get_request_id()
@@ -48,6 +92,8 @@ def emit_success(command: str, data: object, as_json: bool, warnings: list[str] 
             warnings=warnings or [],
             request_id=request_id,
             duration_ms=duration_ms,
+            profile=_meta_profile(),
+            command_mode=_command_mode(command),
         )
     else:
         if warnings:
@@ -61,7 +107,14 @@ def fail(command: str, error: CliError, as_json: bool) -> None:
     request_id = get_request_id()
     duration_ms = get_duration_ms()
     if as_json:
-        emit_error_json(command=command, error=error, request_id=request_id, duration_ms=duration_ms)
+        emit_error_json(
+            command=command,
+            error=error,
+            request_id=request_id,
+            duration_ms=duration_ms,
+            profile=_meta_profile(),
+            command_mode=_command_mode(command),
+        )
     else:
         emit_error_human(error)
     clear_request_start()

@@ -5,11 +5,13 @@ from typer.testing import CliRunner
 
 from webex_cli.cli import app
 from webex_cli.commands import auth as auth_commands
+from webex_cli.commands import event as event_commands
 from webex_cli.commands import meeting as meeting_commands
 from webex_cli.commands import recording as recording_commands
 from webex_cli.commands import transcript as transcript_commands
 from webex_cli.config.credentials import CredentialRecord
 from webex_cli.errors import DomainCode, exit_code_for
+from webex_cli.version import SCHEMA_VERSION
 
 
 class _FakeClient:
@@ -53,7 +55,8 @@ class _FakeStore:
 
 
 def _load_contract() -> dict:
-    path = Path(__file__).resolve().parent / "fixtures" / "envelope_contract_v1_1.json"
+    version_token = SCHEMA_VERSION.replace(".", "_")
+    path = Path(__file__).resolve().parent / "fixtures" / f"envelope_contract_v{version_token}.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -82,21 +85,38 @@ def test_json_envelope_compatibility_for_command_groups(monkeypatch) -> None:
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _FakeClient())
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _FakeClient())
+    monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
 
     commands = [
-        ["auth", "login", "--json"],
-        ["auth", "whoami", "--json"],
-        ["auth", "logout", "--json"],
-        ["profile", "list", "--json"],
-        ["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"],
-        ["transcript", "status", "m1", "--json"],
-        ["recording", "status", "m1", "--json"],
+        (["auth", "login", "--json"], "mutation"),
+        (["auth", "whoami", "--json"], "read"),
+        (["auth", "logout", "--json"], "mutation"),
+        (["profile", "list", "--json"], "read"),
+        (["meeting", "list", "--from", "2026-01-01", "--to", "2026-01-02", "--json"], "read"),
+        (["transcript", "status", "m1", "--json"], "read"),
+        (["recording", "status", "m1", "--json"], "read"),
+        (["event", "ingress", "status", "--json"], "listen"),
+        (
+            [
+                "meeting",
+                "create",
+                "Project Kickoff",
+                "2026-01-01T10:00:00Z",
+                "2026-01-01T11:00:00Z",
+                "--dry-run",
+                "--idempotency-auto",
+                "--json",
+            ],
+            "mutation",
+        ),
     ]
-    for cmd in commands:
+    for cmd, expected_mode in commands:
         result = runner.invoke(app, cmd)
         assert result.exit_code == 0, result.stdout
         payload = json.loads(result.stdout)
         _assert_envelope_shape(payload, contract)
+        assert payload["meta"]["profile"] == "default"
+        assert payload["meta"]["command_mode"] == expected_mode
 
 
 def test_error_envelope_compatibility(monkeypatch) -> None:
@@ -107,3 +127,14 @@ def test_error_envelope_compatibility(monkeypatch) -> None:
     payload = json.loads(result.stdout)
     _assert_envelope_shape(payload, contract)
     assert payload["ok"] is False
+    assert payload["meta"]["profile"] == "default"
+    assert payload["meta"]["command_mode"] == "mutation"
+
+
+def test_historical_envelope_contract_fixtures_remain_loadable() -> None:
+    fixtures_dir = Path(__file__).resolve().parent / "fixtures"
+    for name in ("envelope_contract_v1_1.json", "envelope_contract_v1_2.json", "envelope_contract_v1_3.json"):
+        payload = json.loads((fixtures_dir / name).read_text(encoding="utf-8"))
+        assert "schema_version" in payload
+        assert "required_top_level_keys" in payload
+        assert "required_meta_keys" in payload

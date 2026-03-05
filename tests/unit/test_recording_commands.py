@@ -101,6 +101,51 @@ class _RecordingListClient:
         )
 
 
+class _RecordingSearchClient:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    def list_recordings(self, *, from_utc, to_utc, page_size, page_token, host_email=None, meeting_id=None):  # noqa: ANN001
+        self.calls.append(page_token)
+        if page_token is None:
+            return (
+                [
+                    {
+                        "id": "r1",
+                        "meetingId": "m1",
+                        "topic": "Board Review",
+                        "createTime": "2026-01-03T10:00:00Z",
+                        "durationSeconds": 300,
+                        "sizeBytes": 1024,
+                        "downloadUrl": "https://example.test/r1.mp4",
+                    },
+                    {
+                        "id": "r2",
+                        "meetingId": "m2",
+                        "topic": "Daily Sync",
+                        "createTime": "2026-01-02T10:00:00Z",
+                        "durationSeconds": 120,
+                        "sizeBytes": 512,
+                    },
+                ],
+                "next-recording-token",
+            )
+        return (
+            [
+                {
+                    "id": "r3",
+                    "meetingId": "m3",
+                    "topic": "board followup",
+                    "createTime": "2026-01-01T10:00:00Z",
+                    "durationSeconds": 180,
+                    "sizeBytes": 2048,
+                    "downloadUrl": "https://example.test/r3.mp4",
+                }
+            ],
+            None,
+        )
+
+
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _AmbiguousRecordingClient())
     with pytest.raises(typer.Exit) as exc:
@@ -273,3 +318,49 @@ def test_recording_download_verify_checksum_mismatch(monkeypatch) -> None:
         assert exc.value.exit_code == 10
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_recording_search_applies_query_filter_sort_and_contract(monkeypatch, capsys) -> None:
+    client = _RecordingSearchClient()
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: client)
+    recording_commands.search_recordings(
+        query="board",
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value="downloadable=true AND size_bytes>=1024",
+        sort_value="started_at:desc",
+        limit=10,
+        max_pages=5,
+        page_token=None,
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["r1", "r3"]
+    assert payload["data"]["items"][0]["resource_type"] == "recording"
+    assert payload["data"]["items"][0]["title"] == "Board Review"
+    assert payload["data"]["items"][0]["snippet"] == "Board Review"
+    assert payload["data"]["items"][0]["sort_key"] == "2026-01-03T10:00:00Z"
+    assert payload["data"]["next_page_token"] is None
+    assert client.calls == [None, "next-recording-token"]
+
+
+def test_recording_search_with_page_token_fetches_single_page(monkeypatch, capsys) -> None:
+    client = _RecordingSearchClient()
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: client)
+    recording_commands.search_recordings(
+        query="board",
+        from_value="2026-01-01",
+        to_value="2026-01-04",
+        filter_value=None,
+        sort_value=None,
+        limit=10,
+        max_pages=5,
+        page_token="resume-token",
+        case_sensitive=False,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["resource_id"] for item in payload["data"]["items"]] == ["r3"]
+    assert payload["data"]["next_page_token"] is None
+    assert client.calls == ["resume-token"]

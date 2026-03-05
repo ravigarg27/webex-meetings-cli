@@ -25,6 +25,56 @@ class Settings:
     oauth_scope: str | None = None
     oauth_poll_interval_seconds: int | None = None
     oauth_timeout_seconds: int | None = None
+    events_workers: int | None = None
+    events_shutdown_timeout_sec: int | None = None
+    events_dedupe_ttl_hours: int | None = None
+    events_dlq_retention_days: int | None = None
+    events_ingress_bind_host: str | None = None
+    events_ingress_bind_port: int | None = None
+    events_ingress_public_base_url: str | None = None
+    events_ingress_path: str | None = None
+    events_ingress_secret_env: str | None = None
+    search_local_index_enabled: bool | None = None
+    search_local_index_stale_hours: int | None = None
+    search_local_index_prune_days: int | None = None
+    mutations_idempotency_retention_days: int | None = None
+    phase2x_disable_mutations: bool | None = None
+
+
+def _validate_optional_str(path: Path, key: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`{key}` must be a string when set.",
+            details={"path": str(path)},
+        )
+    return value
+
+
+def _validate_optional_int(path: Path, key: str, value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`{key}` must be an integer when set.",
+            details={"path": str(path)},
+        )
+    return value
+
+
+def _validate_optional_bool(path: Path, key: str, value: Any) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`{key}` must be a boolean when set.",
+            details={"path": str(path)},
+        )
+    return value
 
 
 def _settings_cache_key(path: Path) -> tuple[str, bool, int | None]:
@@ -64,59 +114,35 @@ def load_settings() -> Settings:
                 details={"path": str(path)},
             )
         api_base_url = data.get("api_base_url", "https://webexapis.com")
-        default_tz = data.get("default_tz")
-        oauth_client_id = data.get("oauth_client_id")
-        oauth_device_authorize_url = data.get("oauth_device_authorize_url")
-        oauth_token_url = data.get("oauth_token_url")
-        oauth_scope = data.get("oauth_scope")
-        oauth_poll_interval_seconds = data.get("oauth_poll_interval_seconds")
-        oauth_timeout_seconds = data.get("oauth_timeout_seconds")
+        default_tz = _validate_optional_str(path, "default_tz", data.get("default_tz"))
+        oauth_client_id = _validate_optional_str(path, "oauth_client_id", data.get("oauth_client_id"))
+        oauth_device_authorize_url = _validate_optional_str(path, "oauth_device_authorize_url", data.get("oauth_device_authorize_url"))
+        oauth_token_url = _validate_optional_str(path, "oauth_token_url", data.get("oauth_token_url"))
+        oauth_scope = _validate_optional_str(path, "oauth_scope", data.get("oauth_scope"))
+        oauth_poll_interval_seconds = _validate_optional_int(path, "oauth_poll_interval_seconds", data.get("oauth_poll_interval_seconds"))
+        oauth_timeout_seconds = _validate_optional_int(path, "oauth_timeout_seconds", data.get("oauth_timeout_seconds"))
+        events_workers = _validate_optional_int(path, "events_workers", data.get("events_workers"))
+        events_shutdown_timeout_sec = _validate_optional_int(path, "events_shutdown_timeout_sec", data.get("events_shutdown_timeout_sec"))
+        events_dedupe_ttl_hours = _validate_optional_int(path, "events_dedupe_ttl_hours", data.get("events_dedupe_ttl_hours"))
+        events_dlq_retention_days = _validate_optional_int(path, "events_dlq_retention_days", data.get("events_dlq_retention_days"))
+        events_ingress_bind_host = _validate_optional_str(path, "events_ingress_bind_host", data.get("events_ingress_bind_host"))
+        events_ingress_bind_port = _validate_optional_int(path, "events_ingress_bind_port", data.get("events_ingress_bind_port"))
+        events_ingress_public_base_url = _validate_optional_str(path, "events_ingress_public_base_url", data.get("events_ingress_public_base_url"))
+        events_ingress_path = _validate_optional_str(path, "events_ingress_path", data.get("events_ingress_path"))
+        events_ingress_secret_env = _validate_optional_str(path, "events_ingress_secret_env", data.get("events_ingress_secret_env"))
+        search_local_index_enabled = _validate_optional_bool(path, "search_local_index_enabled", data.get("search_local_index_enabled"))
+        search_local_index_stale_hours = _validate_optional_int(path, "search_local_index_stale_hours", data.get("search_local_index_stale_hours"))
+        search_local_index_prune_days = _validate_optional_int(path, "search_local_index_prune_days", data.get("search_local_index_prune_days"))
+        mutations_idempotency_retention_days = _validate_optional_int(
+            path,
+            "mutations_idempotency_retention_days",
+            data.get("mutations_idempotency_retention_days"),
+        )
+        phase2x_disable_mutations = _validate_optional_bool(path, "phase2x_disable_mutations", data.get("phase2x_disable_mutations"))
         if not isinstance(api_base_url, str):
             raise CliError(
                 DomainCode.VALIDATION_ERROR,
                 "`api_base_url` must be a string.",
-                details={"path": str(path)},
-            )
-        if default_tz is not None and not isinstance(default_tz, str):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`default_tz` must be a string when set.",
-                details={"path": str(path)},
-            )
-        if oauth_client_id is not None and not isinstance(oauth_client_id, str):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_client_id` must be a string when set.",
-                details={"path": str(path)},
-            )
-        if oauth_device_authorize_url is not None and not isinstance(oauth_device_authorize_url, str):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_device_authorize_url` must be a string when set.",
-                details={"path": str(path)},
-            )
-        if oauth_token_url is not None and not isinstance(oauth_token_url, str):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_token_url` must be a string when set.",
-                details={"path": str(path)},
-            )
-        if oauth_scope is not None and not isinstance(oauth_scope, str):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_scope` must be a string when set.",
-                details={"path": str(path)},
-            )
-        if oauth_poll_interval_seconds is not None and not isinstance(oauth_poll_interval_seconds, int):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_poll_interval_seconds` must be an integer when set.",
-                details={"path": str(path)},
-            )
-        if oauth_timeout_seconds is not None and not isinstance(oauth_timeout_seconds, int):
-            raise CliError(
-                DomainCode.VALIDATION_ERROR,
-                "`oauth_timeout_seconds` must be an integer when set.",
                 details={"path": str(path)},
             )
         settings = Settings(
@@ -128,6 +154,20 @@ def load_settings() -> Settings:
             oauth_scope=oauth_scope,
             oauth_poll_interval_seconds=oauth_poll_interval_seconds,
             oauth_timeout_seconds=oauth_timeout_seconds,
+            events_workers=events_workers,
+            events_shutdown_timeout_sec=events_shutdown_timeout_sec,
+            events_dedupe_ttl_hours=events_dedupe_ttl_hours,
+            events_dlq_retention_days=events_dlq_retention_days,
+            events_ingress_bind_host=events_ingress_bind_host,
+            events_ingress_bind_port=events_ingress_bind_port,
+            events_ingress_public_base_url=events_ingress_public_base_url,
+            events_ingress_path=events_ingress_path,
+            events_ingress_secret_env=events_ingress_secret_env,
+            search_local_index_enabled=search_local_index_enabled,
+            search_local_index_stale_hours=search_local_index_stale_hours,
+            search_local_index_prune_days=search_local_index_prune_days,
+            mutations_idempotency_retention_days=mutations_idempotency_retention_days,
+            phase2x_disable_mutations=phase2x_disable_mutations,
         )
         _SETTINGS_CACHE = settings
         _SETTINGS_CACHE_KEY = cache_key
@@ -149,6 +189,20 @@ def save_settings(settings: Settings) -> None:
             "oauth_scope": settings.oauth_scope,
             "oauth_poll_interval_seconds": settings.oauth_poll_interval_seconds,
             "oauth_timeout_seconds": settings.oauth_timeout_seconds,
+            "events_workers": settings.events_workers,
+            "events_shutdown_timeout_sec": settings.events_shutdown_timeout_sec,
+            "events_dedupe_ttl_hours": settings.events_dedupe_ttl_hours,
+            "events_dlq_retention_days": settings.events_dlq_retention_days,
+            "events_ingress_bind_host": settings.events_ingress_bind_host,
+            "events_ingress_bind_port": settings.events_ingress_bind_port,
+            "events_ingress_public_base_url": settings.events_ingress_public_base_url,
+            "events_ingress_path": settings.events_ingress_path,
+            "events_ingress_secret_env": settings.events_ingress_secret_env,
+            "search_local_index_enabled": settings.search_local_index_enabled,
+            "search_local_index_stale_hours": settings.search_local_index_stale_hours,
+            "search_local_index_prune_days": settings.search_local_index_prune_days,
+            "mutations_idempotency_retention_days": settings.mutations_idempotency_retention_days,
+            "phase2x_disable_mutations": settings.phase2x_disable_mutations,
         }
         for key, value in optional.items():
             if value is not None:

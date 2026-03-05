@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.3",
+  "required_top_level_keys": [
+    "ok",
+    "command",
+    "data",
+    "warnings",
+    "error",
+    "meta"
+  ],
+  "required_meta_keys": [
+    "request_id",
+    "timestamp",
+    "cli_version",
+    "schema_version",
+    "duration_ms",
+    "profile",
+    "command_mode"
+  ]
+}

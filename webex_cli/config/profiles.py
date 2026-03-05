@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -66,6 +66,7 @@ class ProfileRecord:
     site_url: str | None
     created_at: str
     updated_at: str
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -95,6 +96,7 @@ class ProfileStore:
             name=DEFAULT_PROFILE_KEY,
             default_tz=settings.default_tz,
             site_url=None,
+            settings={},
             created_at=now,
             updated_at=now,
         )
@@ -243,6 +245,7 @@ class ProfileStore:
             name=display_name,
             default_tz=default_tz,
             site_url=site_url,
+            settings={},
             created_at=now,
             updated_at=now,
         )
@@ -338,6 +341,18 @@ class ProfileStore:
             return None
         return record.default_tz
 
+    def get_setting(self, profile_key: str, dotted_key: str) -> Any:
+        registry = self.ensure_initialized()
+        record = registry.profiles.get(profile_key)
+        if record is None:
+            return None
+        value: Any = record.settings
+        for part in dotted_key.split("."):
+            if not isinstance(value, dict) or part not in value:
+                return None
+            value = value[part]
+        return value
+
     def _load_registry(self) -> ProfileRegistry:
         path = profiles_path()
         try:
@@ -366,12 +381,16 @@ class ProfileStore:
         for key, value in raw_profiles.items():
             if not isinstance(value, dict):
                 raise CliError(DomainCode.VALIDATION_ERROR, "Profile entry must be an object.")
+            raw_settings = value.get("settings") or {}
+            if not isinstance(raw_settings, dict):
+                raise CliError(DomainCode.VALIDATION_ERROR, "Profile settings must be an object.")
             canonical = _canonical_profile_name(key)
             profiles[canonical] = ProfileRecord(
                 key=canonical,
                 name=str(value.get("name") or key),
                 default_tz=value.get("default_tz"),
                 site_url=value.get("site_url"),
+                settings=raw_settings,
                 created_at=str(value.get("created_at") or _utc_now_iso()),
                 updated_at=str(value.get("updated_at") or _utc_now_iso()),
             )
@@ -382,6 +401,7 @@ class ProfileStore:
                 name=DEFAULT_PROFILE_KEY,
                 default_tz=None,
                 site_url=None,
+                settings={},
                 created_at=now,
                 updated_at=now,
             )

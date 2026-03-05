@@ -1,0 +1,8 @@
+{
+  "search_capability_unavailable": "SEARCH_CAPABILITY_UNAVAILABLE",
+  "transcript_segments_unavailable": "TRANSCRIPT_SEGMENTS_UNAVAILABLE",
+  "event_ingress_capability_unavailable": "EVENT_INGRESS_CAPABILITY_UNAVAILABLE",
+  "template_capability_unavailable": "TEMPLATE_CAPABILITY_UNAVAILABLE",
+  "mutation_conflict": "MUTATION_CONFLICT",
+  "confirmation_required_non_interactive": "CONFIRMATION_REQUIRED_NON_INTERACTIVE"
+}

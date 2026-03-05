@@ -10,6 +10,7 @@ import pytest
 from webex_cli.config import credentials as credentials_module
 from webex_cli.config.credentials import CredentialRecord, CredentialStore
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.runtime import use_non_interactive
 
 
 def _patch_paths(monkeypatch, root: Path) -> None:
@@ -130,6 +131,29 @@ def test_ci_strict_blocks_file_fallback_when_non_interactive(monkeypatch) -> Non
     try:
         with pytest.raises(CliError) as exc:
             CredentialStore().save(CredentialRecord(token="token123"))
+        assert exc.value.code == DomainCode.VALIDATION_ERROR
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_explicit_non_interactive_flag_blocks_file_fallback_even_with_tty(monkeypatch) -> None:
+    tmp_path = Path(".test_tmp") / f"credentials-{uuid.uuid4().hex}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    class _YesTty:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr(credentials_module.sys, "stdin", _YesTty())
+    monkeypatch.setattr(credentials_module.sys, "stdout", _YesTty())
+    try:
+        with use_non_interactive(True):
+            with pytest.raises(CliError) as exc:
+                CredentialStore().save(CredentialRecord(token="token123"))
         assert exc.value.code == DomainCode.VALIDATION_ERROR
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

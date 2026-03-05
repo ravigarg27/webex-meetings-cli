@@ -64,3 +64,28 @@ def test_save_settings_omits_none_fields(monkeypatch) -> None:
         assert payload == {"api_base_url": "https://webexapis.com"}
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_load_settings_supports_phase2x_keys(monkeypatch) -> None:
+    root, path = _temp_settings_path()
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "api_base_url": "https://webexapis.com",
+                    "events_workers": 4,
+                    "events_ingress_public_base_url": "https://example.test",
+                    "search_local_index_enabled": True,
+                    "mutations_idempotency_retention_days": 30,
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_module, "settings_path", lambda: path)
+        loaded = settings_module.load_settings()
+        assert loaded.events_workers == 4
+        assert loaded.events_ingress_public_base_url == "https://example.test"
+        assert loaded.search_local_index_enabled is True
+        assert loaded.mutations_idempotency_retention_days == 30
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

@@ -13,11 +13,14 @@ class CliError(Exception):
     message: str
     details: dict[str, Any] = field(default_factory=dict)
     retryable: bool | None = None
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
         super().__init__(self.message)
         if self.retryable is None:
             self.retryable = retryable_for(self.code)
+        if self.error_code is None:
+            self.error_code = self.code.value
 
     @property
     def exit_code(self) -> int:

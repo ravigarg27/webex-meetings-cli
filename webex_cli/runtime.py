@@ -11,6 +11,7 @@ _REQUEST_ID: ContextVar[str | None] = ContextVar("webex_request_id", default=Non
 _REQUEST_ID_OVERRIDE: ContextVar[str | None] = ContextVar("webex_request_id_override", default=None)
 _REQUEST_STARTED_MONO: ContextVar[float | None] = ContextVar("webex_request_started_mono", default=None)
 _LOG_FORMAT: ContextVar[str] = ContextVar("webex_log_format", default="text")
+_NON_INTERACTIVE: ContextVar[bool] = ContextVar("webex_non_interactive", default=False)
 
 
 def get_current_profile() -> str | None:
@@ -61,6 +62,10 @@ def get_request_id_override() -> str | None:
     return _REQUEST_ID_OVERRIDE.get()
 
 
+def reset_request_id_override(token: Token[str | None]) -> None:
+    _REQUEST_ID_OVERRIDE.reset(token)
+
+
 def reset_request_id(token: Token[str | None]) -> None:
     _REQUEST_ID.reset(token)
 
@@ -102,3 +107,24 @@ def get_log_format() -> str:
 
 def reset_log_format(token: Token[str]) -> None:
     _LOG_FORMAT.reset(token)
+
+
+def set_non_interactive(value: bool) -> Token[bool]:
+    return _NON_INTERACTIVE.set(bool(value))
+
+
+def get_non_interactive() -> bool:
+    return _NON_INTERACTIVE.get()
+
+
+def reset_non_interactive(token: Token[bool]) -> None:
+    _NON_INTERACTIVE.reset(token)
+
+
+@contextmanager
+def use_non_interactive(value: bool) -> Iterator[None]:
+    token = set_non_interactive(value)
+    try:
+        yield
+    finally:
+        reset_non_interactive(token)
