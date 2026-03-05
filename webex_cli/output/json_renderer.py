@@ -18,9 +18,8 @@ def _meta(request_id: str | None = None, duration_ms: int | None = None) -> dict
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cli_version": __version__,
         "schema_version": SCHEMA_VERSION,
+        "duration_ms": 0 if duration_ms is None else duration_ms,
     }
-    if duration_ms is not None:
-        payload["duration_ms"] = duration_ms
     return payload
 
 

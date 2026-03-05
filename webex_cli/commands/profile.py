@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from webex_cli.commands.common import emit_success, fail, handle_unexpected
+from webex_cli.commands.common import emit_success, fail, handle_unexpected, profile_scope
 from webex_cli.config import ProfileStore
 from webex_cli.errors import CliError
 
@@ -20,7 +20,8 @@ def create_profile(
 ) -> None:
     command = "profile create"
     try:
-        item = ProfileStore().create_profile(name=name, default_tz=default_tz, site_url=site_url)
+        with profile_scope(None):
+            item = ProfileStore().create_profile(name=name, default_tz=default_tz, site_url=site_url)
         emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -34,7 +35,8 @@ def list_profiles(
 ) -> None:
     command = "profile list"
     try:
-        items = ProfileStore().list_profiles()
+        with profile_scope(None):
+            items = ProfileStore().list_profiles()
         emit_success(command, {"items": items}, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -49,7 +51,8 @@ def show_profile(
 ) -> None:
     command = "profile show"
     try:
-        item = ProfileStore().show_profile(name=name)
+        with profile_scope(None):
+            item = ProfileStore().show_profile(name=name)
         emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -64,7 +67,8 @@ def use_profile(
 ) -> None:
     command = "profile use"
     try:
-        item = ProfileStore().use_profile(name)
+        with profile_scope(None):
+            item = ProfileStore().use_profile(name)
         emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -79,10 +83,10 @@ def delete_profile(
 ) -> None:
     command = "profile delete"
     try:
-        item = ProfileStore().delete_profile(name)
+        with profile_scope(None):
+            item = ProfileStore().delete_profile(name)
         emit_success(command, item, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
     except Exception as exc:
         handle_unexpected(command, as_json=json_output, exc=exc)
-

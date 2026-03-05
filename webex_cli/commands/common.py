@@ -17,8 +17,11 @@ from webex_cli.oauth import is_expiring_soon, refresh_access_token, resolve_oaut
 from webex_cli.output.human import emit_error_human, emit_success_human, emit_warnings_human
 from webex_cli.output.json_renderer import emit_error_json, emit_success_json
 from webex_cli.runtime import (
+    clear_request_id,
+    clear_request_start,
     get_current_profile,
     get_duration_ms,
+    get_request_id_override,
     get_request_id,
     mark_request_start,
     peek_request_id,
@@ -28,9 +31,11 @@ from webex_cli.runtime import (
     set_request_id,
     use_profile,
 )
+from webex_cli.utils.logging import get_logger
 
 _REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
+logger = get_logger(__name__)
 
 
 def emit_success(command: str, data: object, as_json: bool, warnings: list[str] | None = None) -> None:
@@ -48,6 +53,8 @@ def emit_success(command: str, data: object, as_json: bool, warnings: list[str] 
         if warnings:
             emit_warnings_human(warnings)
         emit_success_human(data)
+    clear_request_start()
+    clear_request_id()
 
 
 def fail(command: str, error: CliError, as_json: bool) -> None:
@@ -57,10 +64,13 @@ def fail(command: str, error: CliError, as_json: bool) -> None:
         emit_error_json(command=command, error=error, request_id=request_id, duration_ms=duration_ms)
     else:
         emit_error_human(error)
+    clear_request_start()
+    clear_request_id()
     raise typer.Exit(code=error.exit_code)
 
 
 def handle_unexpected(command: str, as_json: bool, exc: Exception) -> None:
+    logger.exception("Unhandled exception in %s", command)
     fail(
         command,
         CliError(
@@ -132,57 +142,66 @@ def _profile_refresh_lock(profile_key: str) -> threading.Lock:
         return lock
 
 
+def _release_profile_refresh_lock(profile_key: str, lock: threading.Lock) -> None:
+    with _REFRESH_LOCKS_GUARD:
+        current = _REFRESH_LOCKS.get(profile_key)
+        if current is lock and not lock.locked():
+            _REFRESH_LOCKS.pop(profile_key, None)
+
+
 def _refresh_oauth_record(profile_key: str, *, force: bool) -> CredentialRecord:
     lock = _profile_refresh_lock(profile_key)
-    with lock:
-        store = CredentialStore(profile=profile_key)
-        current = store.load()
-        if current.auth_type != "oauth":
-            return current
-        if not force and not is_expiring_soon(current.expires_at):
-            return current
-        if not current.refresh_token:
-            store.mark_invalid("invalid")
-            raise CliError(
-                DomainCode.AUTH_INVALID,
-                "OAuth session is missing a refresh token. Re-authenticate.",
-                details={"auth_cause": "invalid"},
-            )
+    try:
+        with lock:
+            store = CredentialStore(profile=profile_key)
+            current = store.load()
+            if current.auth_type != "oauth":
+                return current
+            if not force and not is_expiring_soon(current.expires_at):
+                return current
+            if not current.refresh_token:
+                store.mark_invalid("invalid")
+                raise CliError(
+                    DomainCode.AUTH_INVALID,
+                    "OAuth session is missing a refresh token. Re-authenticate.",
+                    details={"auth_cause": "invalid"},
+                )
 
-        try:
-            config = resolve_oauth_device_config(
-                client_id=current.oauth_client_id,
-                device_authorize_url=current.oauth_device_authorize_url,
-                token_url=current.oauth_token_url,
-                scope=current.oauth_scope,
-                poll_interval_seconds=current.oauth_poll_interval_seconds,
-                timeout_seconds=current.oauth_timeout_seconds,
-            )
-            refreshed = refresh_access_token(config, current.refresh_token)
-        except CliError as exc:
-            if exc.code == DomainCode.AUTH_INVALID:
-                cause = str((exc.details or {}).get("auth_cause") or "invalid")
-                store.mark_invalid(cause)
-            raise
+            try:
+                config = resolve_oauth_device_config(
+                    client_id=current.oauth_client_id,
+                    device_authorize_url=current.oauth_device_authorize_url,
+                    token_url=current.oauth_token_url,
+                    scope=current.oauth_scope,
+                    poll_interval_seconds=current.oauth_poll_interval_seconds,
+                    timeout_seconds=current.oauth_timeout_seconds,
+                )
+                refreshed = refresh_access_token(config, current.refresh_token)
+            except CliError as exc:
+                if exc.code == DomainCode.AUTH_INVALID:
+                    cause = str((exc.details or {}).get("auth_cause") or "invalid")
+                    store.mark_invalid(cause)
+                raise
 
-        store.save(
-            CredentialRecord(
-                token=refreshed.access_token,
-                auth_type="oauth",
-                refresh_token=refreshed.refresh_token or current.refresh_token,
-                expires_at=refreshed.expires_at,
-                scopes=refreshed.scopes,
-                invalid_reason=None,
-                oauth_client_id=current.oauth_client_id,
-                oauth_device_authorize_url=current.oauth_device_authorize_url,
-                oauth_token_url=current.oauth_token_url,
-                oauth_scope=current.oauth_scope,
-                oauth_poll_interval_seconds=current.oauth_poll_interval_seconds,
-                oauth_timeout_seconds=current.oauth_timeout_seconds,
+            store.save(
+                CredentialRecord(
+                    token=refreshed.access_token,
+                    auth_type="oauth",
+                    refresh_token=refreshed.refresh_token or current.refresh_token,
+                    expires_at=refreshed.expires_at,
+                    scopes=refreshed.scopes,
+                    invalid_reason=None,
+                    oauth_client_id=current.oauth_client_id,
+                    oauth_device_authorize_url=current.oauth_device_authorize_url,
+                    oauth_token_url=current.oauth_token_url,
+                    oauth_scope=current.oauth_scope,
+                    oauth_poll_interval_seconds=current.oauth_poll_interval_seconds,
+                    oauth_timeout_seconds=current.oauth_timeout_seconds,
+                )
             )
-        )
-        store.clear_invalid()
-        return store.load()
+            return store.load()
+    finally:
+        _release_profile_refresh_lock(profile_key, lock)
 
 
 def _refresh_oauth_token(profile_key: str) -> str:
@@ -310,7 +329,7 @@ def profile_scope(profile: str | None) -> Iterator[None]:
     request_id_token = None
     request_start_token = None
     if peek_request_id() is None:
-        request_id_token = set_request_id(None)
+        request_id_token = set_request_id(get_request_id_override())
     if peek_request_start() is None:
         request_start_token = mark_request_start()
     try:

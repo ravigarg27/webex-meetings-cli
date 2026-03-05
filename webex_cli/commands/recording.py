@@ -20,7 +20,7 @@ from webex_cli.commands.common import (
 )
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import RecordingStatus, map_recording_status
-from webex_cli.utils.files import atomic_write_bytes, checksum_from_metadata, compute_checksum
+from webex_cli.utils.files import checksum_from_metadata
 from webex_cli.utils.time import parse_time_range
 
 recording_app = typer.Typer(help="List and download Webex meeting recordings.")
@@ -72,12 +72,22 @@ def _to_int(value: object) -> int | None:
         return None
     if text.isdigit():
         return int(text)
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_present(item: dict[str, Any], keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        if key in item and item.get(key) is not None:
+            return item.get(key)
     return None
 
 
 def _normalize_recording(item: dict[str, Any]) -> dict[str, Any]:
-    duration_seconds = _to_int(item.get("durationSeconds") or item.get("duration"))
-    size_bytes = _to_int(item.get("sizeBytes") or item.get("size"))
+    duration_seconds = _to_int(_first_present(item, ("durationSeconds", "duration")))
+    size_bytes = _to_int(_first_present(item, ("sizeBytes", "size")))
     links = item.get("temporaryDirectDownloadLinks")
     has_temp_links = isinstance(links, dict) and bool(links)
     return {
@@ -154,12 +164,11 @@ def list_recordings(
     tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
     page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording list"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             if last is not None and (from_value is not None or to_value is not None):
                 raise CliError(
                     DomainCode.VALIDATION_ERROR,
@@ -227,12 +236,11 @@ def list_recordings(
 def status_recording(
     meeting_id: str,
     recording_id: str | None = typer.Option(None, "--recording-id", help="Specific recording ID, required if the meeting has multiple recordings."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording status"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             if recording_id:
                 recording_id = validate_id(recording_id, "recording_id")
@@ -285,12 +293,11 @@ def download_recording(
         help="Verify file checksum when upstream metadata provides one.",
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the output file if it already exists."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "recording download"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             if recording_id:
                 recording_id = validate_id(recording_id, "recording_id")
@@ -300,6 +307,8 @@ def download_recording(
                     "`--quality` must be one of: best, high, medium.",
                     details={"quality": quality},
                 )
+            output_path = Path(out)
+            warnings: list[str] = []
             with managed_client(client_factory=build_client) as client:
                 selected = _resolve_recording(client, meeting_id, recording_id)
                 if selected is None:
@@ -307,28 +316,18 @@ def download_recording(
                 selected_id = selected.get("id") or selected.get("recordingId")
                 if not selected_id:
                     raise CliError(DomainCode.NOT_FOUND, "Recording ID missing from upstream payload.")
-                content, actual_quality = client.download_recording(str(selected_id), quality)
-            warnings: list[str] = []
-            if verify_checksum:
-                checksum_meta = checksum_from_metadata(selected)
-                if checksum_meta is None:
-                    warnings.append("CHECKSUM_METADATA_MISSING")
-                else:
-                    algorithm, expected = checksum_meta
-                    actual = compute_checksum(content, algorithm)
-                    if actual != expected:
-                        raise CliError(
-                            DomainCode.DOWNLOAD_FAILED,
-                            "Downloaded recording checksum mismatch.",
-                            details={
-                                "recording_id": str(selected_id),
-                                "algorithm": algorithm,
-                                "expected": expected,
-                                "actual": actual,
-                            },
-                        )
-            output_path = Path(out)
-            atomic_write_bytes(output_path, content, overwrite=overwrite)
+                checksum_meta: tuple[str, str] | None = None
+                if verify_checksum:
+                    checksum_meta = checksum_from_metadata(selected)
+                    if checksum_meta is None:
+                        warnings.append("CHECKSUM_METADATA_MISSING")
+                actual_quality = client.download_recording_to_file(
+                    str(selected_id),
+                    quality,
+                    output_path,
+                    overwrite=overwrite,
+                    checksum=checksum_meta,
+                )
             if actual_quality != quality:
                 warnings.append("QUALITY_FALLBACK")
             emit_success(

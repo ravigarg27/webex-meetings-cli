@@ -75,12 +75,11 @@ def list_meetings(
     tz: str | None = typer.Option(None, "--tz", help="Timezone for interpreting bare dates (e.g. America/New_York)."),
     page_size: int = typer.Option(50, "--page-size", help="Number of results per API page (1-200)."),
     page_token: str | None = typer.Option(None, "--page-token", help="Resume from a page token returned by a previous call."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting list"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             if last is not None and (from_value is not None or to_value is not None):
                 raise CliError(
                     DomainCode.VALIDATION_ERROR,
@@ -147,12 +146,11 @@ def list_meetings(
 @meeting_app.command("get", help="Fetch full details for a single meeting.")
 def get_meeting(
     meeting_id: str,
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting get"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             with managed_client(client_factory=build_client) as client:
                 item = client.get_meeting(meeting_id)
@@ -166,12 +164,11 @@ def get_meeting(
 @meeting_app.command("join-url", help="Print the join URL for a meeting.")
 def join_url(
     meeting_id: str,
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "meeting join-url"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             with managed_client(client_factory=build_client) as client:
                 item = client.get_meeting_join_url(meeting_id)

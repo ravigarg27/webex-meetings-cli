@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
+from pathlib import Path
 import socket
 import time
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from webex_cli.errors import CliError, DomainCode
+from webex_cli.utils.files import atomic_write_stream
 from webex_cli.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -165,10 +168,11 @@ class WebexApiClient:
                     response.status_code,
                     attempt + 1,
                 )
+                retry_after_delay = self._retry_after_delay(response)
                 last_error = self._map_response_error(response, path=path_for_error)
+                response.close()
                 if attempt == self.retry_attempts - 1:
                     raise last_error
-                retry_after_delay = self._retry_after_delay(response)
                 if retry_after_delay is not None:
                     time.sleep(max(0.0, retry_after_delay))
                 else:
@@ -181,7 +185,10 @@ class WebexApiClient:
                 logger.info("attempting oauth refresh after 401 method=%s target=%s", method, target_for_log)
                 new_token = self.refresh_token_callback()
                 if not new_token:
-                    raise self._map_response_error(response, path=path_for_error)
+                    mapped = self._map_response_error(response, path=path_for_error)
+                    response.close()
+                    raise mapped
+                response.close()
                 self.token = new_token
                 refreshed_after_401 = True
                 try:
@@ -200,7 +207,9 @@ class WebexApiClient:
                     target_for_log,
                     response.status_code,
                 )
-                raise self._map_response_error(response, path=path_for_error)
+                mapped = self._map_response_error(response, path=path_for_error)
+                response.close()
+                raise mapped
             return response
 
         if last_error:
@@ -250,6 +259,34 @@ class WebexApiClient:
                 details={"path": path},
             ) from exc
 
+    def _request_stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> httpx.Response:
+        timeout = timeout_seconds or self.timeout_seconds
+        url = self._build_url(path)
+
+        def _send() -> httpx.Response:
+            request = self._get_client().build_request(
+                method=method,
+                url=url,
+                headers=self._headers(),
+                params=params,
+                timeout=timeout,
+            )
+            return self._get_client().send(request, stream=True)
+
+        return self._retry_request(
+            method=method,
+            target_for_log=path,
+            path_for_error=path,
+            request_call=_send,
+        )
+
     def _request_absolute(
         self,
         method: str,
@@ -272,6 +309,33 @@ class WebexApiClient:
             ),
         )
 
+    def _request_absolute_stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout_seconds: int,
+        path_for_error: str,
+        include_auth: bool,
+    ) -> httpx.Response:
+        safe_url = self._safe_url_for_log(url)
+
+        def _send() -> httpx.Response:
+            request = self._get_client().build_request(
+                method=method,
+                url=url,
+                headers=self._headers() if include_auth else None,
+                timeout=timeout_seconds,
+            )
+            return self._get_client().send(request, stream=True)
+
+        return self._retry_request(
+            method=method,
+            target_for_log=safe_url,
+            path_for_error=path_for_error,
+            request_call=_send,
+        )
+
     @staticmethod
     def _address_is_private_or_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         return bool(
@@ -282,6 +346,14 @@ class WebexApiClient:
             or address.is_multicast
             or address.is_unspecified
         )
+
+    @staticmethod
+    def _is_ip_literal(hostname: str) -> bool:
+        try:
+            ipaddress.ip_address(hostname.strip())
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _host_is_private_or_local(hostname: str) -> bool:
@@ -356,7 +428,72 @@ class WebexApiClient:
                 "Recording download URL host is not trusted. Set WEBEX_ALLOW_UNTRUSTED_DOWNLOAD_HOSTS=1 to override.",
                 details={"download_host": normalized_host},
             )
+        if not trusted_host and allow_untrusted and not self._is_ip_literal(normalized_host):
+            raise CliError(
+                DomainCode.VALIDATION_ERROR,
+                "Untrusted download host override requires an IP-literal host to reduce DNS rebinding risk.",
+                details={"download_host": normalized_host},
+            )
         return url, trusted_host
+
+    @staticmethod
+    def _content_type_header(response: httpx.Response) -> str:
+        return str(response.headers.get("Content-Type") or "").strip().lower()
+
+    @staticmethod
+    def _validate_content_type(response: httpx.Response, *, allowed_prefixes: tuple[str, ...], operation: str) -> None:
+        content_type = WebexApiClient._content_type_header(response)
+        if not content_type:
+            return
+        base_type = content_type.split(";", 1)[0].strip()
+        for prefix in allowed_prefixes:
+            if base_type.startswith(prefix):
+                return
+        raise CliError(
+            DomainCode.DOWNLOAD_FAILED,
+            f"Unexpected content type for {operation}.",
+            details={"content_type": content_type},
+        )
+
+    @staticmethod
+    def _stream_response_to_file(
+        response: httpx.Response,
+        output_path: Path,
+        *,
+        overwrite: bool,
+        checksum: tuple[str, str] | None = None,
+    ) -> None:
+        hasher = None
+        expected = None
+        if checksum is not None:
+            algorithm, expected = checksum
+            normalized_algorithm = algorithm.strip().lower()
+            if normalized_algorithm not in {"sha256", "md5"}:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "Unsupported checksum algorithm.",
+                    details={"algorithm": algorithm},
+                )
+            hasher = hashlib.new(normalized_algorithm)
+
+        def _chunks() -> Any:
+            for chunk in response.iter_bytes():
+                if not chunk:
+                    continue
+                if hasher is not None:
+                    hasher.update(chunk)
+                yield chunk
+
+        atomic_write_stream(output_path, _chunks(), overwrite=overwrite)
+        if hasher is not None and expected is not None:
+            actual = hasher.hexdigest().lower()
+            if actual != expected.strip().lower():
+                output_path.unlink(missing_ok=True)
+                raise CliError(
+                    DomainCode.DOWNLOAD_FAILED,
+                    "Downloaded file checksum mismatch.",
+                    details={"expected": expected, "actual": actual},
+                )
 
     def whoami(self) -> dict[str, Any]:
         payload = self._request_json("GET", "/v1/people/me")
@@ -385,11 +522,20 @@ class WebexApiClient:
     def _normalize_page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
         if not isinstance(payload, dict):
             raise CliError(DomainCode.UPSTREAM_UNAVAILABLE, "Upstream returned invalid pagination payload type.")
-        found_items_key = any(key in payload for key in ("items", "meetings", "recordings"))
-        items = payload.get("items") or payload.get("meetings") or payload.get("recordings") or []
+        items: Any
+        if "items" in payload:
+            items = payload.get("items")
+        elif "meetings" in payload:
+            items = payload.get("meetings")
+        elif "recordings" in payload:
+            items = payload.get("recordings")
+        else:
+            items = []
+        if items is None:
+            items = []
         if not isinstance(items, list):
             raise CliError(DomainCode.UPSTREAM_UNAVAILABLE, "Upstream returned non-list items payload.")
-        if not found_items_key and payload:
+        if not any(key in payload for key in ("items", "meetings", "recordings")) and payload:
             raise CliError(
                 DomainCode.UPSTREAM_UNAVAILABLE,
                 "Upstream pagination payload missing items key.",
@@ -443,7 +589,37 @@ class WebexApiClient:
             params={"format": format_value},
             timeout_seconds=self.download_timeout_seconds,
         )
+        self._validate_content_type(
+            response,
+            allowed_prefixes=("text/plain", "text/vtt", "application/json", "application/octet-stream"),
+            operation="transcript download",
+        )
         return response.content
+
+    def download_transcript_to_file(
+        self,
+        transcript_id: str,
+        format_value: str,
+        output_path: Path,
+        *,
+        overwrite: bool,
+        checksum: tuple[str, str] | None = None,
+    ) -> None:
+        response = self._request_stream(
+            "GET",
+            f"/v1/meetingTranscripts/{self._encoded(transcript_id)}/download",
+            params={"format": format_value},
+            timeout_seconds=self.download_timeout_seconds,
+        )
+        try:
+            self._validate_content_type(
+                response,
+                allowed_prefixes=("text/plain", "text/vtt", "application/json", "application/octet-stream"),
+                operation="transcript download",
+            )
+            self._stream_response_to_file(response, output_path, overwrite=overwrite, checksum=checksum)
+        finally:
+            response.close()
 
     def list_recordings(
         self,
@@ -528,9 +704,11 @@ class WebexApiClient:
             url = normalized_links.get(candidate_quality)
             if url:
                 return url, candidate_quality
-        # Fallback to any other upstream quality key when present.
-        for candidate_quality in sorted(normalized_links):
-            return normalized_links[candidate_quality], candidate_quality
+        # Fallback to non-canonical upstream quality keys.
+        extras = sorted([key for key in normalized_links if key not in set(canonical_order)])
+        if extras:
+            chosen = extras[0]
+            return normalized_links[chosen], chosen
         return None, quality
 
     def download_recording(self, recording_id: str, quality: str) -> tuple[bytes, str]:
@@ -550,7 +728,48 @@ class WebexApiClient:
             path_for_error="/v1/recordings/download",
             include_auth=trusted_host,
         )
+        self._validate_content_type(
+            response,
+            allowed_prefixes=("video/", "audio/", "application/octet-stream"),
+            operation="recording download",
+        )
         return response.content, str(actual_quality)
+
+    def download_recording_to_file(
+        self,
+        recording_id: str,
+        quality: str,
+        output_path: Path,
+        *,
+        overwrite: bool,
+        checksum: tuple[str, str] | None = None,
+    ) -> str:
+        metadata = self.get_recording(recording_id)
+        download_url, actual_quality = self._select_download_link(metadata, quality)
+        if not download_url:
+            raise CliError(
+                DomainCode.NOT_FOUND,
+                "Recording download URL not available.",
+                details={"recording_id": recording_id},
+            )
+        safe_url, trusted_host = self._validate_download_url(download_url)
+        response = self._request_absolute_stream(
+            "GET",
+            safe_url,
+            timeout_seconds=self.download_timeout_seconds,
+            path_for_error="/v1/recordings/download",
+            include_auth=trusted_host,
+        )
+        try:
+            self._validate_content_type(
+                response,
+                allowed_prefixes=("video/", "audio/", "application/octet-stream"),
+                operation="recording download",
+            )
+            self._stream_response_to_file(response, output_path, overwrite=overwrite, checksum=checksum)
+        finally:
+            response.close()
+        return str(actual_quality)
 
     def close(self) -> None:
         if self._client is not None:

@@ -21,6 +21,13 @@ MAX_POLL_INTERVAL_SECONDS = 30
 DEFAULT_TIMEOUT_SECONDS = 600
 
 
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class OAuthDeviceConfig:
     client_id: str
@@ -89,17 +96,17 @@ def resolve_oauth_device_config(
     )
     resolved_token_url = token_url or os.environ.get("WEBEX_OAUTH_TOKEN_URL") or settings.oauth_token_url or DEFAULT_TOKEN_URL
     resolved_scope = scope or os.environ.get("WEBEX_OAUTH_SCOPE") or settings.oauth_scope or DEFAULT_SCOPES
-    resolved_poll = (
-        poll_interval_seconds
-        or _parse_int_env("WEBEX_OAUTH_POLL_INTERVAL")
-        or settings.oauth_poll_interval_seconds
-        or DEFAULT_POLL_INTERVAL_SECONDS
+    resolved_poll = _coalesce(
+        poll_interval_seconds,
+        _parse_int_env("WEBEX_OAUTH_POLL_INTERVAL"),
+        settings.oauth_poll_interval_seconds,
+        DEFAULT_POLL_INTERVAL_SECONDS,
     )
-    resolved_timeout = (
-        timeout_seconds
-        or _parse_int_env("WEBEX_OAUTH_TIMEOUT")
-        or settings.oauth_timeout_seconds
-        or DEFAULT_TIMEOUT_SECONDS
+    resolved_timeout = _coalesce(
+        timeout_seconds,
+        _parse_int_env("WEBEX_OAUTH_TIMEOUT"),
+        settings.oauth_timeout_seconds,
+        DEFAULT_TIMEOUT_SECONDS,
     )
 
     if resolved_poll < MIN_POLL_INTERVAL_SECONDS or resolved_poll > MAX_POLL_INTERVAL_SECONDS:

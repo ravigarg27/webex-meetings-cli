@@ -7,6 +7,7 @@ import pytest
 import typer
 
 from webex_cli.commands import recording as recording_commands
+from webex_cli.errors import CliError, DomainCode
 
 
 class _AmbiguousRecordingClient:
@@ -21,6 +22,10 @@ class _DownloadRecordingClient:
     def download_recording(self, recording_id, quality):
         return (b"abc", "medium")
 
+    def download_recording_to_file(self, recording_id, quality, output_path, *, overwrite, checksum=None):
+        output_path.write_bytes(b"abc")
+        return "medium"
+
 
 class _DownloadRecordingChecksumClient:
     def list_recordings_for_meeting(self, meeting_id):
@@ -28,6 +33,19 @@ class _DownloadRecordingChecksumClient:
 
     def download_recording(self, recording_id, quality):
         return (b"abc", "best")
+
+    def download_recording_to_file(self, recording_id, quality, output_path, *, overwrite, checksum=None):
+        content = b"abc"
+        if checksum is not None:
+            algorithm, expected = checksum
+            import hashlib
+
+            digest = hashlib.new(algorithm)
+            digest.update(content)
+            if digest.hexdigest() != expected:
+                raise CliError(DomainCode.DOWNLOAD_FAILED, "Downloaded file checksum mismatch.")
+        output_path.write_bytes(content)
+        return "best"
 
 
 class _RecordingStatusNoFieldClient:
@@ -175,6 +193,32 @@ def test_recording_status_unknown_status_warns(monkeypatch, capsys) -> None:
     assert payload["warnings"] == ["UNMAPPED_RECORDING_STATUS"]
 
 
+def test_normalize_recording_parses_float_strings_for_size_and_duration() -> None:
+    item = recording_commands._normalize_recording(
+        {
+            "id": "r1",
+            "meetingId": "m1",
+            "durationSeconds": "300.0",
+            "sizeBytes": "1024.0",
+        }
+    )
+    assert item["duration_seconds"] == 300
+    assert item["size_bytes"] == 1024
+
+
+def test_normalize_recording_preserves_zero_values() -> None:
+    item = recording_commands._normalize_recording(
+        {
+            "id": "r1",
+            "meetingId": "m1",
+            "durationSeconds": 0,
+            "sizeBytes": 0,
+        }
+    )
+    assert item["duration_seconds"] == 0
+    assert item["size_bytes"] == 0
+
+
 def test_recording_download_verify_checksum_success(monkeypatch, capsys) -> None:
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _DownloadRecordingChecksumClient())
     tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
@@ -188,7 +232,6 @@ def test_recording_download_verify_checksum_success(monkeypatch, capsys) -> None
             quality="best",
             verify_checksum=True,
             overwrite=False,
-            profile=None,
             json_output=True,
         )
         payload = json.loads(capsys.readouterr().out)
@@ -199,8 +242,18 @@ def test_recording_download_verify_checksum_success(monkeypatch, capsys) -> None
 
 def test_recording_download_verify_checksum_mismatch(monkeypatch) -> None:
     class _MismatchClient(_DownloadRecordingChecksumClient):
-        def download_recording(self, recording_id, quality):
-            return (b"zzz", "best")
+        def download_recording_to_file(self, recording_id, quality, output_path, *, overwrite, checksum=None):
+            content = b"zzz"
+            if checksum is not None:
+                algorithm, expected = checksum
+                import hashlib
+
+                digest = hashlib.new(algorithm)
+                digest.update(content)
+                if digest.hexdigest() != expected:
+                    raise CliError(DomainCode.DOWNLOAD_FAILED, "Downloaded file checksum mismatch.")
+            output_path.write_bytes(content)
+            return "best"
 
     monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _MismatchClient())
     tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
@@ -215,7 +268,6 @@ def test_recording_download_verify_checksum_mismatch(monkeypatch) -> None:
                 quality="best",
                 verify_checksum=True,
                 overwrite=False,
-                profile=None,
                 json_output=True,
             )
         assert exc.value.exit_code == 10

@@ -3,13 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import re
 import shutil
-import tempfile
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from webex_cli.config.paths import (
     config_dir,
@@ -20,7 +19,7 @@ from webex_cli.config.paths import (
 )
 from webex_cli.config.settings import load_settings
 from webex_cli.errors import CliError, DomainCode
-from webex_cli.utils.files import replace_file_atomic
+from webex_cli.utils.files import write_json_atomic
 
 DEFAULT_PROFILE_KEY = "default"
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,50}$")
@@ -228,6 +227,15 @@ class ProfileStore:
                     "`--site-url` must be a valid https URL.",
                     details={"site_url": site_url},
                 )
+        if default_tz:
+            try:
+                ZoneInfo(default_tz)
+            except ZoneInfoNotFoundError as exc:
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "Invalid profile default timezone.",
+                    details={"default_tz": default_tz},
+                ) from exc
         now = _utc_now_iso()
         display_name = name.strip()
         registry.profiles[key] = ProfileRecord(
@@ -302,14 +310,25 @@ class ProfileStore:
             )
         from webex_cli.config.credentials import CredentialStore  # local import to avoid module cycle
 
-        CredentialStore(profile=key).clear()
         registry.profiles.pop(key, None)
         self._write_registry(registry)
+        try:
+            CredentialStore(profile=key).clear()
+        except Exception as exc:
+            # Roll back registry change so profile state remains consistent.
+            registry.profiles[key] = record
+            self._write_registry(registry)
+            raise CliError(
+                DomainCode.INTERNAL_ERROR,
+                "Profile deletion failed while removing credentials; deletion was rolled back.",
+                details={"profile": name, "reason": type(exc).__name__},
+            ) from exc
         return {
             "name": record.name,
             "key": key,
             "deleted_local_credentials": True,
-            "deleted_local_settings": True,
+            "deleted_local_settings": False,
+            "deleted_local_metadata": True,
         }
 
     def profile_default_tz(self, profile_key: str) -> str | None:
@@ -383,15 +402,4 @@ class ProfileStore:
 
     @staticmethod
     def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-        text = json.dumps(payload, indent=2)
-        fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
-            replace_file_atomic(Path(tmp_path), path)
-            if os.name != "nt":
-                os.chmod(path, 0o600)
-        finally:
-            tmp = Path(tmp_path)
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
+        write_json_atomic(path, payload)

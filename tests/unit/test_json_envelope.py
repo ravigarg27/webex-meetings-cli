@@ -28,3 +28,9 @@ def test_emit_error_json_shape(capsys) -> None:
     assert payload["command"] == "recording download"
     assert payload["error"]["code"] == "NO_ACCESS"
     assert payload["error"]["retryable"] is False
+
+
+def test_emit_success_json_always_includes_duration_ms(capsys) -> None:
+    emit_success_json("meeting list", {"items": []}, warnings=[])
+    payload = json.loads(capsys.readouterr().out)
+    assert "duration_ms" in payload["meta"]

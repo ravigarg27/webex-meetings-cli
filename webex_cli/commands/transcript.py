@@ -25,7 +25,7 @@ from webex_cli.commands.common import (
 )
 from webex_cli.errors import CliError, DomainCode
 from webex_cli.models import TranscriptStatus, map_transcript_status
-from webex_cli.utils.files import atomic_write_bytes, checksum_from_metadata, compute_checksum, sanitize_filename
+from webex_cli.utils.files import checksum_from_metadata, sanitize_filename
 from webex_cli.utils.time import parse_time_range
 
 transcript_app = typer.Typer(help="Download and monitor Webex meeting transcripts.")
@@ -257,37 +257,18 @@ def _process_batch_item(
 
         transcript = _resolve_transcript_record(client, meeting_id)
         transcript_id = str(transcript["id"])
-        content = client.download_transcript(transcript_id, api_format)
+        checksum_meta: tuple[str, str] | None = None
         if verify_checksum:
             checksum_meta = checksum_from_metadata(transcript)
-            if checksum_meta is not None:
-                algorithm, expected = checksum_meta
-                actual = compute_checksum(content, algorithm)
-                if actual != expected:
-                    mismatch_error = CliError(
-                        DomainCode.DOWNLOAD_FAILED,
-                        "Downloaded transcript checksum mismatch.",
-                        details={
-                            "meeting_id": meeting_id,
-                            "transcript_id": transcript_id,
-                            "algorithm": algorithm,
-                            "expected": expected,
-                            "actual": actual,
-                        },
-                    )
-                    return (
-                        {
-                            "meeting_id": meeting_id,
-                            "status": "failed",
-                            "output_path": None,
-                            "error_code": mismatch_error.code.value,
-                            "error_message": mismatch_error.message,
-                        },
-                        mismatch_error,
-                    )
         filename = _batch_filename(meeting, output_format, artifact_id=transcript_id, download_url=None)
         out_path = target_dir / filename
-        atomic_write_bytes(out_path, content, overwrite=overwrite)
+        client.download_transcript_to_file(
+            transcript_id,
+            api_format,
+            out_path,
+            overwrite=overwrite,
+            checksum=checksum_meta,
+        )
         throttle.on_success()
         return (
             {
@@ -328,12 +309,11 @@ def _process_batch_item(
 @transcript_app.command("status", help="Check whether a transcript is available for a meeting.")
 def status(
     meeting_id: str,
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript status"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             with managed_client(client_factory=build_client) as client:
                 transcript_status, payload, warnings = _read_transcript_status(client, meeting_id)
@@ -360,12 +340,11 @@ def status(
 def get_transcript(
     meeting_id: str,
     format_value: str = typer.Option("text", "--format", help="Output format: text/txt (default) or json."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript get"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             format_value = _normalize_get_format(format_value)
             with managed_client(client_factory=build_client) as client:
@@ -393,12 +372,11 @@ def wait_transcript(
     meeting_id: str,
     timeout: int = typer.Option(600, "--timeout", help="Maximum seconds to wait before giving up. Default: 600."),
     interval: int = typer.Option(10, "--interval", help="Seconds between status checks. Default: 10."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript wait"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             if timeout <= 0 or interval <= 0:
                 raise CliError(
@@ -468,40 +446,30 @@ def download_transcript(
         help="Verify file checksum when upstream metadata provides one.",
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite the file if it already exists."),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript download"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             meeting_id = validate_id(meeting_id, "meeting_id")
             api_format, output_format = _normalize_download_format(format_value)
+            output_path = Path(out)
             with managed_client(client_factory=build_client) as client:
                 transcript = _resolve_transcript_record(client, meeting_id)
                 transcript_id = str(transcript["id"])
-                data_bytes = client.download_transcript(transcript_id, api_format)
-            warnings: list[str] = []
-            if verify_checksum:
-                checksum_meta = checksum_from_metadata(transcript)
-                if checksum_meta is None:
-                    warnings.append("CHECKSUM_METADATA_MISSING")
-                else:
-                    algorithm, expected = checksum_meta
-                    actual = compute_checksum(data_bytes, algorithm)
-                    if actual != expected:
-                        raise CliError(
-                            DomainCode.DOWNLOAD_FAILED,
-                            "Downloaded transcript checksum mismatch.",
-                            details={
-                                "meeting_id": meeting_id,
-                                "transcript_id": transcript_id,
-                                "algorithm": algorithm,
-                                "expected": expected,
-                                "actual": actual,
-                            },
-                        )
-            output_path = Path(out)
-            atomic_write_bytes(output_path, data_bytes, overwrite=overwrite)
+                warnings: list[str] = []
+                checksum_meta: tuple[str, str] | None = None
+                if verify_checksum:
+                    checksum_meta = checksum_from_metadata(transcript)
+                    if checksum_meta is None:
+                        warnings.append("CHECKSUM_METADATA_MISSING")
+                client.download_transcript_to_file(
+                    transcript_id,
+                    api_format,
+                    output_path,
+                    overwrite=overwrite,
+                    checksum=checksum_meta,
+                )
             emit_success(
                 command,
                 {"meeting_id": meeting_id, "format": output_format, "output_path": str(output_path)},
@@ -537,12 +505,11 @@ def batch_transcripts(
         "--concurrency",
         help=f"Batch worker concurrency ({MIN_BATCH_CONCURRENCY}-{MAX_BATCH_CONCURRENCY}).",
     ),
-    profile: str | None = typer.Option(None, "--profile", help="Use a specific local profile for this command."),
     json_output: bool = typer.Option(False, "--json", help="Emit output as a JSON envelope."),
 ) -> None:
     command = "transcript batch"
     try:
-        with profile_scope(profile):
+        with profile_scope(None):
             api_format, output_format = _normalize_download_format(format_value)
             continue_mode = continue_on_error
             if concurrency < MIN_BATCH_CONCURRENCY or concurrency > MAX_BATCH_CONCURRENCY:
@@ -568,7 +535,7 @@ def batch_transcripts(
                 total = len(meetings)
                 indexed_meetings = list(enumerate(meetings))
                 results_by_index: dict[int, dict[str, Any]] = {}
-                first_terminal_error: CliError | None = None
+                terminal_errors_by_index: dict[int, CliError] = {}
                 next_to_submit = 0
                 throttle = _AdaptiveThrottle()
 
@@ -616,17 +583,17 @@ def batch_transcripts(
                                     "error_message": terminal_error.message,
                                 }
                             results_by_index[idx] = result
-                            if terminal_error and first_terminal_error is None:
-                                first_terminal_error = terminal_error
+                            if terminal_error is not None:
+                                terminal_errors_by_index[idx] = terminal_error
 
                         while (
-                            continue_mode or first_terminal_error is None
+                            continue_mode or not terminal_errors_by_index
                         ) and next_to_submit < total and len(inflight) < concurrency:
                             idx, meeting = indexed_meetings[next_to_submit]
                             _submit(idx, meeting)
                             next_to_submit += 1
 
-                if not continue_mode and first_terminal_error and next_to_submit < total:
+                if not continue_mode and terminal_errors_by_index and next_to_submit < total:
                     for idx in range(next_to_submit, total):
                         meeting = meetings[idx]
                         results_by_index[idx] = {
@@ -654,8 +621,9 @@ def batch_transcripts(
                     as_json=json_output,
                     warnings=warnings + (["ADAPTIVE_THROTTLE_APPLIED"] if throttle.applied else []),
                 )
-                if not continue_mode and first_terminal_error is not None:
-                    raise typer.Exit(code=first_terminal_error.exit_code)
+                if not continue_mode and terminal_errors_by_index:
+                    first_index = min(terminal_errors_by_index)
+                    raise typer.Exit(code=terminal_errors_by_index[first_index].exit_code)
     except typer.Exit:
         raise
     except CliError as exc:

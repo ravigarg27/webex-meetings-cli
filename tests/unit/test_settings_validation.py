@@ -1,6 +1,7 @@
 import shutil
 from pathlib import Path
 import uuid
+import json
 
 import pytest
 
@@ -49,5 +50,17 @@ def test_save_settings_writes_json_atomically(monkeypatch) -> None:
         loaded = settings_module.load_settings()
         assert loaded.api_base_url == "https://webexapis.com"
         assert loaded.default_tz == "UTC"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_save_settings_omits_none_fields(monkeypatch) -> None:
+    root, path = _temp_settings_path()
+    try:
+        monkeypatch.setattr(settings_module, "config_dir", lambda: root)
+        monkeypatch.setattr(settings_module, "settings_path", lambda: path)
+        settings_module.save_settings(settings_module.Settings(api_base_url="https://webexapis.com"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload == {"api_base_url": "https://webexapis.com"}
     finally:
         shutil.rmtree(root, ignore_errors=True)

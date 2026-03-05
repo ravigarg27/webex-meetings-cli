@@ -60,6 +60,7 @@ def test_save_and_load_oauth_bundle_in_fallback_store(monkeypatch) -> None:
     _patch_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: False)
     monkeypatch.setenv("WEBEX_CREDENTIAL_FALLBACK_POLICY", "allow_file_fallback")
+    monkeypatch.setenv("WEBEX_ALLOW_PLAINTEXT_REFRESH_TOKEN", "1")
     try:
         store = CredentialStore()
         backend = store.save(
@@ -183,6 +184,7 @@ def test_keyring_partial_save_falls_back_and_loads_fallback_bundle(monkeypatch) 
     _patch_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(CredentialStore, "_keyring_available", lambda self: True)
     monkeypatch.setenv("WEBEX_CREDENTIAL_FALLBACK_POLICY", "allow_file_fallback")
+    monkeypatch.setenv("WEBEX_ALLOW_PLAINTEXT_REFRESH_TOKEN", "1")
 
     keyring_data: dict[tuple[str, str], str] = {}
 

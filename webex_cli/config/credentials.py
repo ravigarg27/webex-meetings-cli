@@ -6,12 +6,11 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-import tempfile
 from typing import Any
 
 from webex_cli.config.paths import config_dir, fallback_credentials_path
 from webex_cli.errors import CliError, DomainCode
-from webex_cli.utils.files import replace_file_atomic
+from webex_cli.utils.files import write_json_atomic
 
 SERVICE_NAME = "webex-cli"
 DEFAULT_PROFILE = "default"
@@ -348,18 +347,7 @@ class CredentialStore:
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
-        text = json.dumps(payload, indent=2)
-        fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
-            replace_file_atomic(Path(tmp_path), path)
-            if os.name != "nt":
-                os.chmod(path, 0o600)
-        finally:
-            tmp = Path(tmp_path)
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
+        write_json_atomic(path, payload)
 
     @staticmethod
     def _dpapi_encrypt(data: bytes) -> bytes:
@@ -368,7 +356,7 @@ class CredentialStore:
         out_blob = _WinDataBlob()
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
-        if crypt32.CryptProtectData(ctypes.byref(in_blob), "webex-cli", None, None, None, 0, ctypes.byref(out_blob)) == 0:
+        if crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)) == 0:
             raise OSError("CryptProtectData failed")
         try:
             return ctypes.string_at(out_blob.pbData, out_blob.cbData)

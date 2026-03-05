@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from webex_cli.errors import CliError, DomainCode
 
@@ -32,7 +33,7 @@ def sanitize_filename(value: str) -> str:
     return clean or "artifact"
 
 
-def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None:
+def atomic_write_stream(path: Path, chunks: Iterable[bytes], overwrite: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not overwrite:
         raise CliError(
@@ -43,7 +44,9 @@ def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None
     fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+            for chunk in chunks:
+                if chunk:
+                    handle.write(chunk)
         replace_file_atomic(Path(tmp_path), path)
     finally:
         tmp = Path(tmp_path)
@@ -51,8 +54,27 @@ def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None
             tmp.unlink(missing_ok=True)
 
 
+def atomic_write_bytes(path: Path, data: bytes, overwrite: bool = False) -> None:
+    atomic_write_stream(path, [data], overwrite=overwrite)
+
+
 def atomic_write_text(path: Path, text: str, overwrite: bool = False) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), overwrite=overwrite)
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any], *, file_mode: int = 0o600) -> None:
+    text = json.dumps(payload, indent=2)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        replace_file_atomic(Path(tmp_path), path)
+        if os.name != "nt":
+            os.chmod(path, file_mode)
+    finally:
+        tmp = Path(tmp_path)
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def checksum_from_metadata(metadata: dict[str, Any]) -> tuple[str, str] | None:

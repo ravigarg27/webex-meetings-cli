@@ -8,6 +8,7 @@ import uuid
 
 _CURRENT_PROFILE: ContextVar[str | None] = ContextVar("webex_current_profile", default=None)
 _REQUEST_ID: ContextVar[str | None] = ContextVar("webex_request_id", default=None)
+_REQUEST_ID_OVERRIDE: ContextVar[str | None] = ContextVar("webex_request_id_override", default=None)
 _REQUEST_STARTED_MONO: ContextVar[float | None] = ContextVar("webex_request_started_mono", default=None)
 _LOG_FORMAT: ContextVar[str] = ContextVar("webex_log_format", default="text")
 
@@ -51,8 +52,21 @@ def peek_request_id() -> str | None:
     return _REQUEST_ID.get()
 
 
+def set_request_id_override(request_id: str | None) -> Token[str | None]:
+    resolved = request_id.strip() if request_id and request_id.strip() else None
+    return _REQUEST_ID_OVERRIDE.set(resolved)
+
+
+def get_request_id_override() -> str | None:
+    return _REQUEST_ID_OVERRIDE.get()
+
+
 def reset_request_id(token: Token[str | None]) -> None:
     _REQUEST_ID.reset(token)
+
+
+def clear_request_id() -> None:
+    _REQUEST_ID.set(None)
 
 
 def mark_request_start() -> Token[float | None]:
@@ -72,6 +86,10 @@ def get_duration_ms() -> int | None:
 
 def reset_request_start(token: Token[float | None]) -> None:
     _REQUEST_STARTED_MONO.reset(token)
+
+
+def clear_request_start() -> None:
+    _REQUEST_STARTED_MONO.set(None)
 
 
 def set_log_format(log_format: str) -> Token[str]:

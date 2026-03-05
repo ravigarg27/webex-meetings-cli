@@ -56,6 +56,19 @@ def test_profile_store_rejects_duplicate_case_insensitive_name(monkeypatch) -> N
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_profile_store_rejects_invalid_default_timezone(monkeypatch) -> None:
+    root = _temp_root()
+    _patch_profile_store(monkeypatch, root)
+    try:
+        store = ProfileStore()
+        store.ensure_initialized()
+        with pytest.raises(CliError) as exc:
+            store.create_profile("work", default_tz="Not/AZone", site_url=None)
+        assert exc.value.code == DomainCode.VALIDATION_ERROR
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_profile_store_delete_active_is_blocked(monkeypatch) -> None:
     root = _temp_root()
     _patch_profile_store(monkeypatch, root)
@@ -192,10 +205,10 @@ def test_profile_write_failure_does_not_delete_existing_registry(monkeypatch) ->
     original_payload = {"active_profile": "default", "profiles": {"default": {"name": "default"}}}
     path.write_text(json.dumps(original_payload), encoding="utf-8")
 
-    def _failing_replace(src: Path, dest: Path, *, attempts: int = 5, base_delay_seconds: float = 0.05) -> None:
+    def _failing_write_json(path: Path, payload: dict, *, file_mode: int = 0o600) -> None:
         raise PermissionError("simulated replace failure")
 
-    monkeypatch.setattr(profiles_module, "replace_file_atomic", _failing_replace)
+    monkeypatch.setattr(profiles_module, "write_json_atomic", _failing_write_json)
     try:
         with pytest.raises(PermissionError):
             ProfileStore._write_json_atomic(path, {"active_profile": "default", "profiles": {}})
@@ -221,8 +234,9 @@ def test_delete_profile_does_not_mutate_registry_when_credential_cleanup_fails(m
         store = ProfileStore()
         store.ensure_initialized()
         store.create_profile("work", default_tz=None, site_url=None)
-        with pytest.raises(OSError):
+        with pytest.raises(CliError) as exc:
             store.delete_profile("work")
+        assert exc.value.code == DomainCode.INTERNAL_ERROR
         keys = {item["key"] for item in store.list_profiles()}
         assert "work" in keys
     finally:

@@ -46,6 +46,10 @@ class _FakeClient:
             return b'{"text": "hello"}'
         return b"hello world"
 
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        content = self.download_transcript(transcript_id, format_value)
+        output_path.write_bytes(content)
+
     def list_recordings(self, **kwargs):
         return ([{"id": "r1", "meetingId": "m1", "createTime": "2026-01-01T03:00:00Z"}], None)
 
@@ -57,6 +61,10 @@ class _FakeClient:
 
     def download_recording(self, recording_id, quality):
         return (b"file-bytes", quality)
+
+    def download_recording_to_file(self, recording_id, quality, output_path, *, overwrite, checksum=None):
+        output_path.write_bytes(b"file-bytes")
+        return quality
 
 
 class _FakeStore:
@@ -135,13 +143,12 @@ def test_cli_smoke_live_mode() -> None:
 
     tmp_dir = Path(".test_tmp") / f"e2e-live-{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    old_appdata = os.environ.get("APPDATA")
-    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    env_patch = pytest.MonkeyPatch()
     try:
         # Isolate credential writes from developer machine state.
-        os.environ["APPDATA"] = str(tmp_dir)
-        os.environ["XDG_CONFIG_HOME"] = str(tmp_dir)
-        os.environ["WEBEX_TOKEN"] = token
+        env_patch.setenv("APPDATA", str(tmp_dir))
+        env_patch.setenv("XDG_CONFIG_HOME", str(tmp_dir))
+        env_patch.setenv("WEBEX_TOKEN", token)
 
         login = runner.invoke(app, ["auth", "login", "--json"])
         assert login.exit_code == 0, login.stdout
@@ -239,13 +246,5 @@ def test_cli_smoke_live_mode() -> None:
         logout = runner.invoke(app, ["auth", "logout", "--json"])
         assert logout.exit_code == 0, logout.stdout
     finally:
-        if old_appdata is None:
-            os.environ.pop("APPDATA", None)
-        else:
-            os.environ["APPDATA"] = old_appdata
-        if old_xdg is None:
-            os.environ.pop("XDG_CONFIG_HOME", None)
-        else:
-            os.environ["XDG_CONFIG_HOME"] = old_xdg
-        os.environ.pop("WEBEX_TOKEN", None)
+        env_patch.undo()
         shutil.rmtree(tmp_dir, ignore_errors=True)

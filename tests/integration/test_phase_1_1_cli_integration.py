@@ -24,38 +24,40 @@ class _FakeAuthClient:
         return None
 
 
-class _MemoryCredentialStore:
-    records: dict[str, CredentialRecord] = {}
+def _memory_store_factory(records: dict[str, CredentialRecord]):
+    class _MemoryCredentialStore:
+        def __init__(self, profile: str = "default") -> None:
+            self.profile = profile
 
-    def __init__(self, profile: str = "default") -> None:
-        self.profile = profile
+        def save(self, record: CredentialRecord) -> str:
+            records[self.profile] = record
+            return "keyring"
 
-    def save(self, record: CredentialRecord) -> str:
-        _MemoryCredentialStore.records[self.profile] = record
-        return "keyring"
+        def load(self) -> CredentialRecord:
+            return records[self.profile]
 
-    def load(self) -> CredentialRecord:
-        return _MemoryCredentialStore.records[self.profile]
+        def clear(self) -> None:
+            records.pop(self.profile, None)
 
-    def clear(self) -> None:
-        _MemoryCredentialStore.records.pop(self.profile, None)
+        def mark_invalid(self, reason: str) -> None:  # pragma: no cover
+            record = records[self.profile]
+            record.invalid_reason = reason
 
-    def mark_invalid(self, reason: str) -> None:  # pragma: no cover
-        record = _MemoryCredentialStore.records[self.profile]
-        record.invalid_reason = reason
+        def clear_invalid(self) -> None:  # pragma: no cover
+            record = records[self.profile]
+            record.invalid_reason = None
 
-    def clear_invalid(self) -> None:  # pragma: no cover
-        record = _MemoryCredentialStore.records[self.profile]
-        record.invalid_reason = None
+    return _MemoryCredentialStore
 
 
 def test_profile_auth_isolation_with_cli(monkeypatch) -> None:
-    _MemoryCredentialStore.records = {}
+    records: dict[str, CredentialRecord] = {}
+    memory_store = _memory_store_factory(records)
     runner = CliRunner()
 
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeAuthClient())
-    monkeypatch.setattr(auth_commands, "CredentialStore", _MemoryCredentialStore)
-    monkeypatch.setattr(common_commands, "CredentialStore", _MemoryCredentialStore)
+    monkeypatch.setattr(auth_commands, "CredentialStore", memory_store)
+    monkeypatch.setattr(common_commands, "CredentialStore", memory_store)
     monkeypatch.setenv("WEBEX_CREDENTIAL_FALLBACK_POLICY", "allow_file_fallback")
 
     assert runner.invoke(app, ["profile", "create", "work", "--json"]).exit_code == 0
@@ -75,17 +77,19 @@ def test_profile_auth_isolation_with_cli(monkeypatch) -> None:
     work_payload = json.loads(who_work.stdout)
     assert default_payload["data"]["profile"] == "default"
     assert work_payload["data"]["profile"] == "work"
-    assert _MemoryCredentialStore.records["default"].token == "token-default"
-    assert _MemoryCredentialStore.records["work"].token == "token-work"
+    assert records["default"].token == "token-default"
+    assert records["work"].token == "token-work"
 
 
 def test_oauth_config_precedence_from_cli_flags(monkeypatch) -> None:
     runner = CliRunner()
     captured: dict[str, object] = {}
+    records: dict[str, CredentialRecord] = {}
+    memory_store = _memory_store_factory(records)
 
     monkeypatch.setattr(auth_commands, "build_client", lambda token=None: _FakeAuthClient())
-    monkeypatch.setattr(auth_commands, "CredentialStore", _MemoryCredentialStore)
-    monkeypatch.setattr(common_commands, "CredentialStore", _MemoryCredentialStore)
+    monkeypatch.setattr(auth_commands, "CredentialStore", memory_store)
+    monkeypatch.setattr(common_commands, "CredentialStore", memory_store)
 
     def _capture_config(**kwargs):
         captured.update(kwargs)

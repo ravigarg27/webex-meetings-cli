@@ -81,7 +81,7 @@ Use profiles:
 ```bash
 webex profile create work --default-tz America/New_York
 webex profile use work
-webex auth whoami --profile work --json
+webex --profile work auth whoami --json
 ```
 
 ## Commands
@@ -121,7 +121,7 @@ Global options:
 
 - Prefer `WEBEX_TOKEN` or `--token-stdin`; `--token` is blocked by default.
 - Fallback credential storage is used only if keyring is unavailable.
-- Default fallback policy is `ci_strict`: CI runs must use keyring unless `WEBEX_CREDENTIAL_FALLBACK_POLICY=allow_file_fallback`.
+- Default fallback policy is `ci_strict`: CI and non-interactive sessions must use keyring unless `WEBEX_CREDENTIAL_FALLBACK_POLICY=allow_file_fallback`.
 - Recording download URLs are validated and local/private hosts are blocked.
 - Optional checksum verification:
   - `webex recording download ... --verify-checksum`

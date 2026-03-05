@@ -5,7 +5,11 @@ import os
 import typer
 
 from webex_cli.commands import auth_app, meeting_app, profile_app, recording_app, transcript_app
-from webex_cli.runtime import mark_request_start, set_current_profile, set_log_format, set_request_id
+from webex_cli.runtime import (
+    set_current_profile,
+    set_log_format,
+    set_request_id_override,
+)
 from webex_cli.utils.logging import configure_logging
 from webex_cli.version import __version__
 
@@ -20,6 +24,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -48,9 +53,9 @@ def main(
     if resolved_log_format not in {"text", "json"}:
         raise typer.BadParameter("--log-format must be one of: text, json.")
     configure_logging(resolved_log_format)
+    _ = ctx
     set_log_format(resolved_log_format)
-    set_request_id(request_id)
-    mark_request_start()
+    set_request_id_override(request_id)
     set_current_profile(profile)
 
 

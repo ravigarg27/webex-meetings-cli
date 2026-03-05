@@ -132,6 +132,16 @@ def test_resolve_oauth_device_config_rejects_blank_client_id(monkeypatch) -> Non
     assert exc.value.code == DomainCode.VALIDATION_ERROR
 
 
+def test_resolve_oauth_device_config_rejects_zero_poll_interval_and_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(oauth_module, "load_settings", lambda: Settings())
+    with pytest.raises(CliError) as poll_exc:
+        resolve_oauth_device_config(client_id="client-id", poll_interval_seconds=0)
+    assert poll_exc.value.code == DomainCode.VALIDATION_ERROR
+    with pytest.raises(CliError) as timeout_exc:
+        resolve_oauth_device_config(client_id="client-id", timeout_seconds=0)
+    assert timeout_exc.value.code == DomainCode.VALIDATION_ERROR
+
+
 def test_start_device_authorization_maps_invalid_client_as_validation(monkeypatch) -> None:
     config = oauth_module.OAuthDeviceConfig(
         client_id="bad-client",

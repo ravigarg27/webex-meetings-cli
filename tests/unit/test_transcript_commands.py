@@ -53,6 +53,10 @@ class _TranscriptFormatClient:
         self.last_format = format_value
         return b"ok"
 
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        self.last_format = format_value
+        output_path.write_bytes(b"ok")
+
 
 class _TranscriptChecksumClient:
     def list_transcripts(self, meeting_id):
@@ -60,6 +64,18 @@ class _TranscriptChecksumClient:
 
     def download_transcript(self, transcript_id, format_value):
         return b"hello"
+
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        content = b"hello"
+        if checksum is not None:
+            algorithm, expected = checksum
+            import hashlib
+
+            digest = hashlib.new(algorithm)
+            digest.update(content)
+            if digest.hexdigest() != expected:
+                raise CliError(DomainCode.DOWNLOAD_FAILED, "Downloaded file checksum mismatch.")
+        output_path.write_bytes(content)
 
 
 class _BatchFailFastClient:
@@ -85,11 +101,11 @@ class _BatchFailFastClient:
             return [{"id": "t2", "status": "ready"}]
         return [{"id": f"t-{meeting_id}", "status": "ready"}]
 
-    def download_transcript(self, transcript_id, format_value):
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
         if transcript_id == "t2":
             raise CliError(DomainCode.DOWNLOAD_FAILED, "download failed")
         self.downloaded.append(transcript_id)
-        return b"batch-data"
+        output_path.write_bytes(b"batch-data")
 
 
 class _BatchThrottleClient:
@@ -105,8 +121,8 @@ class _BatchThrottleClient:
             raise CliError(DomainCode.RATE_LIMITED, "rate limited")
         return [{"id": f"t-{meeting_id}", "status": "ready"}]
 
-    def download_transcript(self, transcript_id, format_value):
-        return b"ok"
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        output_path.write_bytes(b"ok")
 
 
 class _BatchFailedStatusClient:
@@ -125,8 +141,31 @@ class _BatchFailedStatusClient:
             return [{"id": "t2", "status": "failed"}]
         return [{"id": f"t-{meeting_id}", "status": "ready"}]
 
-    def download_transcript(self, transcript_id, format_value):
-        return b"ok"
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        output_path.write_bytes(b"ok")
+
+
+class _BatchDeterministicFailFastClient:
+    def list_meetings(self, *, from_utc, to_utc, page_size, page_token, host_email=None):  # noqa: ANN001
+        return (
+            [
+                {"id": "m1", "start": "2026-01-01T00:00:00Z"},
+                {"id": "m2", "start": "2026-01-01T00:00:00Z"},
+                {"id": "m3", "start": "2026-01-01T00:00:00Z"},
+            ],
+            None,
+        )
+
+    def list_transcripts(self, meeting_id):
+        return [{"id": f"t-{meeting_id}", "status": "ready"}]
+
+    def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+        if transcript_id == "t-m1":
+            time.sleep(0.05)
+            raise CliError(DomainCode.NO_ACCESS, "no access")
+        if transcript_id == "t-m2":
+            raise CliError(DomainCode.DOWNLOAD_FAILED, "download failed")
+        output_path.write_bytes(b"ok")
 
 
 def test_transcript_status_maps_not_found(monkeypatch, capsys) -> None:
@@ -245,8 +284,17 @@ def test_transcript_download_verify_checksum_success(monkeypatch, capsys) -> Non
 
 def test_transcript_download_verify_checksum_mismatch(monkeypatch) -> None:
     class _MismatchClient(_TranscriptChecksumClient):
-        def download_transcript(self, transcript_id, format_value):
-            return b"not-hello"
+        def download_transcript_to_file(self, transcript_id, format_value, output_path, *, overwrite, checksum=None):
+            content = b"not-hello"
+            if checksum is not None:
+                algorithm, expected = checksum
+                import hashlib
+
+                digest = hashlib.new(algorithm)
+                digest.update(content)
+                if digest.hexdigest() != expected:
+                    raise CliError(DomainCode.DOWNLOAD_FAILED, "Downloaded file checksum mismatch.")
+            output_path.write_bytes(content)
 
     monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _MismatchClient())
     tmp_dir = Path(".test_tmp") / f"transcript-{uuid.uuid4().hex}"
@@ -383,3 +431,36 @@ def test_transcript_batch_builds_client_once(monkeypatch) -> None:
         assert build_calls["count"] == 1
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_transcript_batch_fail_fast_exit_code_is_deterministic_by_input_order(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(transcript_commands, "build_client", lambda token=None: _BatchDeterministicFailFastClient())
+    tmp_dir = Path(".test_tmp") / f"transcript-batch-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            transcript_commands.batch_transcripts(
+                from_value="2026-01-01",
+                to_value="2026-01-02",
+                download_dir=str(tmp_dir),
+                tz="UTC",
+                format_value="txt",
+                continue_on_error=False,
+                concurrency=2,
+                json_output=True,
+            )
+        # m1 is first in input order and maps to NO_ACCESS (exit 5).
+        assert exc.value.exit_code == 5
+        payload = json.loads(capsys.readouterr().out)
+        results = {item["meeting_id"]: item for item in payload["data"]["results"]}
+        assert results["m1"]["status"] == "failed"
+        assert results["m2"]["status"] == "failed"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_parse_iso_utc_treats_naive_as_utc() -> None:
+    parsed = transcript_commands._parse_iso_utc("2026-03-04T10:00:00")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.isoformat().startswith("2026-03-04T10:00:00")
