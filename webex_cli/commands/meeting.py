@@ -140,6 +140,17 @@ def _validate_start_end(start: str, end: str) -> tuple[str, str]:
     return normalized_start, normalized_end
 
 
+def _require_non_empty_text(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`{field_name}` must not be empty.",
+            details={field_name.lstrip('-').replace('-', '_'): value},
+        )
+    return normalized
+
+
 def _confirm_destructive(command_label: str, confirm: bool, yes: bool) -> None:
     require_confirmation(confirm, yes, command_label=command_label)
     if confirm or yes:
@@ -190,6 +201,130 @@ def _require_capability(
 
 def _emit_mutation(command: str, response: MutationResponse, *, as_json: bool) -> None:
     emit_success(command, response.payload, as_json=as_json, warnings=response.warnings)
+
+
+def _execute_mutation(
+    *,
+    profile: str,
+    command: str,
+    payload: dict[str, Any],
+    dry_run: bool,
+    idempotency_key: str,
+    validation: dict[str, Any],
+    execute: Any,
+) -> MutationResponse:
+    if dry_run:
+        return run_mutation(
+            profile=profile,
+            command=command,
+            payload=payload,
+            dry_run=True,
+            idempotency_key=idempotency_key,
+            validation=validation,
+            execute=lambda _key: {},
+        )
+    return execute()
+
+
+def _create_meeting_with_client(payload: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+    with managed_client(client_factory=build_client) as client:
+        return client.create_meeting(payload, idempotency_key=idempotency_key)
+
+
+def _update_meeting_with_client(meeting_id: str, payload: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+    with managed_client(client_factory=build_client) as client:
+        return client.update_meeting(meeting_id, payload, idempotency_key=idempotency_key)
+
+
+def _apply_template_mutation(
+    *,
+    template_id: str,
+    payload: dict[str, Any],
+    profile_key: str,
+    command: str,
+    mutation_payload: dict[str, Any],
+    idempotency_key: str,
+    validation: dict[str, Any],
+) -> MutationResponse:
+    with managed_client(client_factory=build_client) as client:
+        _require_capability(
+            client,
+            feature="templates",
+            probe_name="probe_templates_access",
+            error_code="TEMPLATE_CAPABILITY_UNAVAILABLE",
+            message="Templates are unavailable for this account.",
+            fallback_command="webex meeting create",
+            fallback_methods=("apply_template",),
+        )
+        return run_mutation(
+            profile=profile_key,
+            command=command,
+            payload=mutation_payload,
+            dry_run=False,
+            idempotency_key=idempotency_key,
+            validation=validation,
+            execute=lambda key: client.apply_template(template_id, payload, idempotency_key=key),
+        )
+
+
+def _create_recurrence_mutation(
+    *,
+    payload: dict[str, Any],
+    profile_key: str,
+    command: str,
+    idempotency_key: str,
+    validation: dict[str, Any],
+) -> MutationResponse:
+    with managed_client(client_factory=build_client) as client:
+        _require_capability(
+            client,
+            feature="recurrence",
+            probe_name="probe_recurrence_access",
+            error_code="RECURRENCE_CAPABILITY_UNAVAILABLE",
+            message="Recurrence mutations are unavailable for this account.",
+            fallback_command="webex meeting create",
+            fallback_methods=("create_recurrence",),
+        )
+        return run_mutation(
+            profile=profile_key,
+            command=command,
+            payload=payload,
+            dry_run=False,
+            idempotency_key=idempotency_key,
+            validation=validation,
+            execute=lambda key: client.create_recurrence(payload, idempotency_key=key),
+        )
+
+
+def _update_recurrence_mutation(
+    *,
+    series_id: str,
+    payload: dict[str, Any],
+    profile_key: str,
+    command: str,
+    mutation_payload: dict[str, Any],
+    idempotency_key: str,
+    validation: dict[str, Any],
+) -> MutationResponse:
+    with managed_client(client_factory=build_client) as client:
+        _require_capability(
+            client,
+            feature="recurrence",
+            probe_name="probe_recurrence_access",
+            error_code="RECURRENCE_CAPABILITY_UNAVAILABLE",
+            message="Recurrence mutations are unavailable for this account.",
+            fallback_command="webex meeting create",
+            fallback_methods=("update_recurrence",),
+        )
+        return run_mutation(
+            profile=profile_key,
+            command=command,
+            payload=mutation_payload,
+            dry_run=False,
+            idempotency_key=idempotency_key,
+            validation=validation,
+            execute=lambda key: client.update_recurrence(series_id, payload, idempotency_key=key),
+        )
 
 
 @meeting_app.command("list", help="List meetings within a date range or the last N meetings.")
@@ -403,6 +538,7 @@ def create_meeting(
     try:
         with profile_scope(None):
             normalized_start, normalized_end = _validate_start_end(start, end)
+            normalized_title = _require_non_empty_text(title, "--title")
             parsed_invitees = (
                 parse_invitees(invitees=invitees, invitees_file=invitees_file, invitees_file_format=invitees_file_format)
                 if invitees or invitees_file
@@ -410,26 +546,36 @@ def create_meeting(
             )
             profile_key = resolve_profile()
             resolved_idempotency_key = resolve_idempotency_key(idempotency_key, idempotency_auto)
+            normalized_template_id = validate_id(template_id, "template_id") if template_id is not None else None
             payload = {
-                "title": title.strip(),
+                "title": normalized_title,
                 "start": normalized_start,
                 "end": normalized_end,
                 "timezone": timezone,
                 "agenda": agenda,
-                "template_id": template_id,
+                "template_id": normalized_template_id,
                 "invitees": parsed_invitees,
             }
             validation = {"invitee_count": len(parsed_invitees)}
-            with managed_client(client_factory=build_client) as client:
-                response = run_mutation(
-                    profile=profile_key,
-                    command=command,
-                    payload=payload,
-                    dry_run=dry_run,
-                    idempotency_key=resolved_idempotency_key,
-                    validation=validation,
-                    execute=lambda key: client.create_meeting(payload, idempotency_key=key),
-                )
+            response = _execute_mutation(
+                profile=profile_key,
+                command=command,
+                payload=payload,
+                dry_run=dry_run,
+                idempotency_key=resolved_idempotency_key,
+                validation=validation,
+                execute=lambda: (
+                    run_mutation(
+                        profile=profile_key,
+                        command=command,
+                        payload=payload,
+                        dry_run=False,
+                        idempotency_key=resolved_idempotency_key,
+                        validation=validation,
+                        execute=lambda key: _create_meeting_with_client(payload, key),
+                    )
+                ),
+            )
             _emit_mutation(command, response, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -459,7 +605,7 @@ def update_meeting(
             resolved_idempotency_key = resolve_idempotency_key(idempotency_key, idempotency_auto)
             payload: dict[str, Any] = {}
             if title is not None:
-                payload["title"] = title.strip()
+                payload["title"] = _require_non_empty_text(title, "--title")
             if start is not None:
                 payload["start"] = _parse_host_datetime(start, "start")
             if end is not None:
@@ -474,16 +620,27 @@ def update_meeting(
                 payload["invitees_remove"] = parse_invitees(invitees=invitees_remove, invitees_file=None, invitees_file_format="lines")
             if not payload:
                 raise CliError(DomainCode.VALIDATION_ERROR, "At least one field must be provided for update.")
-            with managed_client(client_factory=build_client) as client:
-                response = run_mutation(
-                    profile=profile_key,
-                    command=command,
-                    payload={"meeting_id": meeting_id, **payload},
-                    dry_run=dry_run,
-                    idempotency_key=resolved_idempotency_key,
-                    validation={"field_count": len(payload)},
-                    execute=lambda key: client.update_meeting(meeting_id, payload, idempotency_key=key),
-                )
+            mutation_payload = {"meeting_id": meeting_id, **payload}
+            validation = {"field_count": len(payload)}
+            response = _execute_mutation(
+                profile=profile_key,
+                command=command,
+                payload=mutation_payload,
+                dry_run=dry_run,
+                idempotency_key=resolved_idempotency_key,
+                validation=validation,
+                execute=lambda: (
+                    run_mutation(
+                        profile=profile_key,
+                        command=command,
+                        payload=mutation_payload,
+                        dry_run=False,
+                        idempotency_key=resolved_idempotency_key,
+                        validation=validation,
+                        execute=lambda key: _update_meeting_with_client(meeting_id, payload, key),
+                    )
+                ),
+            )
             _emit_mutation(command, response, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -682,6 +839,7 @@ def apply_template(
     command = "meeting template apply"
     try:
         with profile_scope(None):
+            template_id = validate_id(template_id, "template_id")
             normalized_start, normalized_end = _validate_start_end(start, end)
             parsed_invitees = (
                 parse_invitees(invitees=invitees, invitees_file=invitees_file, invitees_file_format=invitees_file_format)
@@ -691,25 +849,25 @@ def apply_template(
             profile_key = resolve_profile()
             resolved_idempotency_key = resolve_idempotency_key(idempotency_key, idempotency_auto)
             payload = {"start": normalized_start, "end": normalized_end, "invitees": parsed_invitees}
-            with managed_client(client_factory=build_client) as client:
-                _require_capability(
-                    client,
-                    feature="templates",
-                    probe_name="probe_templates_access",
-                    error_code="TEMPLATE_CAPABILITY_UNAVAILABLE",
-                    message="Templates are unavailable for this account.",
-                    fallback_command="webex meeting create",
-                    fallback_methods=("apply_template",),
-                )
-                response = run_mutation(
-                    profile=profile_key,
+            mutation_payload = {"template_id": template_id, **payload}
+            validation = {"invitee_count": len(parsed_invitees)}
+            response = _execute_mutation(
+                profile=profile_key,
+                command=command,
+                payload=mutation_payload,
+                dry_run=dry_run,
+                idempotency_key=resolved_idempotency_key,
+                validation=validation,
+                execute=lambda: _apply_template_mutation(
+                    template_id=template_id,
+                    payload=payload,
+                    profile_key=profile_key,
                     command=command,
-                    payload={"template_id": template_id, **payload},
-                    dry_run=dry_run,
+                    mutation_payload=mutation_payload,
                     idempotency_key=resolved_idempotency_key,
-                    validation={"invitee_count": len(parsed_invitees)},
-                    execute=lambda key: client.apply_template(template_id, payload, idempotency_key=key),
-                )
+                    validation=validation,
+                ),
+            )
             _emit_mutation(command, response, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -736,6 +894,7 @@ def create_recurrence(
         with profile_scope(None):
             if duration < 1:
                 raise CliError(DomainCode.VALIDATION_ERROR, "`--duration` must be a positive integer.", details={"duration": duration})
+            normalized_title = _require_non_empty_text(title, "--title")
             normalized_start = _parse_host_datetime(start, "start")
             normalized_rrule = validate_rrule(rrule)
             parsed_invitees = (
@@ -746,31 +905,28 @@ def create_recurrence(
             profile_key = resolve_profile()
             resolved_idempotency_key = resolve_idempotency_key(idempotency_key, idempotency_auto)
             payload = {
-                "title": title.strip(),
+                "title": normalized_title,
                 "rrule": normalized_rrule,
                 "start": normalized_start,
                 "duration": duration,
                 "invitees": parsed_invitees,
             }
-            with managed_client(client_factory=build_client) as client:
-                _require_capability(
-                    client,
-                    feature="recurrence",
-                    probe_name="probe_recurrence_access",
-                    error_code="RECURRENCE_CAPABILITY_UNAVAILABLE",
-                    message="Recurrence mutations are unavailable for this account.",
-                    fallback_command="webex meeting create",
-                    fallback_methods=("create_recurrence",),
-                )
-                response = run_mutation(
-                    profile=profile_key,
-                    command=command,
+            validation = {"invitee_count": len(parsed_invitees)}
+            response = _execute_mutation(
+                profile=profile_key,
+                command=command,
+                payload=payload,
+                dry_run=dry_run,
+                idempotency_key=resolved_idempotency_key,
+                validation=validation,
+                execute=lambda: _create_recurrence_mutation(
                     payload=payload,
-                    dry_run=dry_run,
+                    profile_key=profile_key,
+                    command=command,
                     idempotency_key=resolved_idempotency_key,
-                    validation={"invitee_count": len(parsed_invitees)},
-                    execute=lambda key: client.create_recurrence(payload, idempotency_key=key),
-                )
+                    validation=validation,
+                ),
+            )
             _emit_mutation(command, response, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)
@@ -801,25 +957,25 @@ def update_recurrence(
                 payload["from_occurrence"] = _parse_host_datetime(from_occurrence, "from_occurrence")
             if not payload:
                 raise CliError(DomainCode.VALIDATION_ERROR, "At least one recurrence field must be provided.")
-            with managed_client(client_factory=build_client) as client:
-                _require_capability(
-                    client,
-                    feature="recurrence",
-                    probe_name="probe_recurrence_access",
-                    error_code="RECURRENCE_CAPABILITY_UNAVAILABLE",
-                    message="Recurrence mutations are unavailable for this account.",
-                    fallback_command="webex meeting create",
-                    fallback_methods=("update_recurrence",),
-                )
-                response = run_mutation(
-                    profile=profile_key,
+            mutation_payload = {"series_id": series_id, **payload}
+            validation = {"field_count": len(payload)}
+            response = _execute_mutation(
+                profile=profile_key,
+                command=command,
+                payload=mutation_payload,
+                dry_run=dry_run,
+                idempotency_key=resolved_idempotency_key,
+                validation=validation,
+                execute=lambda: _update_recurrence_mutation(
+                    series_id=series_id,
+                    payload=payload,
+                    profile_key=profile_key,
                     command=command,
-                    payload={"series_id": series_id, **payload},
-                    dry_run=dry_run,
+                    mutation_payload=mutation_payload,
                     idempotency_key=resolved_idempotency_key,
-                    validation={"field_count": len(payload)},
-                    execute=lambda key: client.update_recurrence(series_id, payload, idempotency_key=key),
-                )
+                    validation=validation,
+                ),
+            )
             _emit_mutation(command, response, as_json=json_output)
     except CliError as exc:
         fail(command, exc, as_json=json_output)

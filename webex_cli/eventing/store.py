@@ -238,9 +238,14 @@ class EventStore:
             "delivery_attempt": int(row["delivery_attempt"]),
         }
 
-    def queue_events(self, *, checkpoint: str, source: str, limit: int) -> list[dict[str, Any]]:
-        start_value = self.get_checkpoint(checkpoint, source)
-        start_seq = int(start_value or 0) if source == "webex-webhook" else 0
+    def queue_events(self, *, checkpoint: str, source: str, limit: int, from_seq: int | None = None) -> list[dict[str, Any]]:
+        start_seq = 0
+        if source == "webex-webhook":
+            if from_seq is not None:
+                start_seq = from_seq
+            else:
+                start_value = self.get_checkpoint(checkpoint, source)
+                start_seq = int(start_value or 0)
         with self._connect(self.queue_path) as conn:
             rows = conn.execute(
                 """

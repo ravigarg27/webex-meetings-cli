@@ -101,6 +101,88 @@ def test_event_list_file_source_invalid_json_is_validation_error(monkeypatch, ca
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_event_list_rejects_json_with_stdout_sink(monkeypatch) -> None:
+    root = _temp_root()
+    monkeypatch.setenv("APPDATA", str(root))
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            event_commands.listen(
+                source="webex-webhook",
+                source_path=None,
+                from_value=None,
+                checkpoint="cp-json-stdout",
+                max_events=10,
+                workers=1,
+                shutdown_timeout_sec=5,
+                payload_mode="full",
+                sink="stdout",
+                sink_path=None,
+                json_output=True,
+            )
+        assert exc.value.exit_code == 2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_event_list_webhook_source_respects_from_offset(monkeypatch, capsys) -> None:
+    root = _temp_root()
+    sink_path = root / "sink.jsonl"
+    monkeypatch.setenv("APPDATA", str(root))
+    try:
+        event_commands.enqueue_webhook_event(
+            payload={"id": "e1", "event": "created", "created": "2026-01-01T00:00:00Z", "data": {"id": "m1"}},
+            headers={},
+            validate_signature=False,
+        )
+        event_commands.enqueue_webhook_event(
+            payload={"id": "e2", "event": "updated", "created": "2026-01-01T00:01:00Z", "data": {"id": "m2"}},
+            headers={},
+            validate_signature=False,
+        )
+        event_commands.listen(
+            source="webex-webhook",
+            source_path=None,
+            from_value="1",
+            checkpoint="cp-from",
+            max_events=10,
+            workers=1,
+            shutdown_timeout_sec=5,
+            payload_mode="full",
+            sink="file",
+            sink_path=str(sink_path),
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["data"]["processed"] == 1
+        lines = [json.loads(line) for line in sink_path.read_text(encoding="utf-8").splitlines()]
+        assert [line["event_id"] for line in lines] == ["e2"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_event_list_rejects_invalid_from_offset(monkeypatch) -> None:
+    root = _temp_root()
+    monkeypatch.setenv("APPDATA", str(root))
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            event_commands.listen(
+                source="file",
+                source_path="events.jsonl",
+                from_value="abc",
+                checkpoint="cp-bad-from",
+                max_events=10,
+                workers=1,
+                shutdown_timeout_sec=5,
+                payload_mode="full",
+                sink="file",
+                sink_path=str(root / "sink.jsonl"),
+                json_output=True,
+            )
+        assert exc.value.exit_code == 2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_event_list_webhook_source_consumes_queue_and_persists_checkpoint(monkeypatch, capsys) -> None:
     root = _temp_root()
     sink_path = root / "sink.jsonl"
@@ -366,6 +448,7 @@ def test_event_list_webhook_source_requeues_retryable_failure(monkeypatch, capsy
 
 def test_event_list_webhook_source_terminal_failure_goes_to_dlq(monkeypatch, capsys) -> None:
     root = _temp_root()
+    sink_path = root / "sink.jsonl"
     monkeypatch.setenv("APPDATA", str(root))
 
     def _broken_sink(item, sink, sink_path_value):
@@ -387,8 +470,8 @@ def test_event_list_webhook_source_terminal_failure_goes_to_dlq(monkeypatch, cap
             workers=1,
             shutdown_timeout_sec=5,
             payload_mode="full",
-            sink="stdout",
-            sink_path=None,
+            sink="file",
+            sink_path=str(sink_path),
             json_output=True,
         )
         payload = json.loads(capsys.readouterr().out)

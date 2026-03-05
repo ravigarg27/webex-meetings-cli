@@ -44,8 +44,17 @@ class WebexApiClient:
     refresh_token_callback: Callable[[], str] | None = None
     _client: httpx.Client | None = None
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.token}"}
+    def _headers(self, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
+    @staticmethod
+    def _idempotency_headers(idempotency_key: str | None) -> dict[str, str] | None:
+        if not idempotency_key:
+            return None
+        return {"Idempotency-Key": idempotency_key}
 
     def _build_url(self, path: str) -> str:
         return urljoin(f"{self.base_url.rstrip('/')}/", path.lstrip("/"))
@@ -224,6 +233,7 @@ class WebexApiClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         timeout_seconds: int | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         timeout = timeout_seconds or self.timeout_seconds
         url = self._build_url(path)
@@ -232,7 +242,7 @@ class WebexApiClient:
             request_kwargs: dict[str, Any] = {
                 "method": method,
                 "url": url,
-                "headers": self._headers(),
+                "headers": self._headers(extra_headers),
                 "params": params,
                 "timeout": timeout,
             }
@@ -255,8 +265,16 @@ class WebexApiClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         timeout_seconds: int | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        response = self._request(method, path, params=params, json_body=json_body, timeout_seconds=timeout_seconds)
+        response = self._request(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            timeout_seconds=timeout_seconds,
+            extra_headers=extra_headers,
+        )
         if response.content.strip() == b"":
             return {}
         try:
@@ -275,6 +293,7 @@ class WebexApiClient:
         *,
         params: dict[str, Any] | None = None,
         timeout_seconds: int | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         timeout = timeout_seconds or self.timeout_seconds
         url = self._build_url(path)
@@ -283,7 +302,7 @@ class WebexApiClient:
             request = self._get_client().build_request(
                 method=method,
                 url=url,
-                headers=self._headers(),
+                headers=self._headers(extra_headers),
                 params=params,
                 timeout=timeout,
             )
@@ -583,10 +602,18 @@ class WebexApiClient:
         return self.get_meeting(meeting_id)
 
     def create_meeting(self, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self._request_json("POST", "/v1/meetings", json_body=payload)
+        body = dict(payload)
+        if "template_id" in body and "templateId" not in body:
+            body["templateId"] = body.pop("template_id")
+        return self._request_json("POST", "/v1/meetings", json_body=body, extra_headers=self._idempotency_headers(idempotency_key))
 
     def update_meeting(self, meeting_id: str, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self._request_json("PATCH", f"/v1/meetings/{self._encoded(meeting_id)}", json_body=payload)
+        return self._request_json(
+            "PATCH",
+            f"/v1/meetings/{self._encoded(meeting_id)}",
+            json_body=payload,
+            extra_headers=self._idempotency_headers(idempotency_key),
+        )
 
     def cancel_meeting(
         self,
@@ -600,6 +627,7 @@ class WebexApiClient:
             "DELETE",
             f"/v1/meetings/{self._encoded(meeting_id)}",
             json_body={"notify": notify, "reason": reason},
+            extra_headers=self._idempotency_headers(idempotency_key),
         )
 
     def probe_invitees_access(self) -> None:
@@ -611,13 +639,19 @@ class WebexApiClient:
         return items if isinstance(items, list) else []
 
     def add_invitees(self, meeting_id: str, invitees: list[str], *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self._request_json("POST", "/v1/meetingInvitees", json_body={"meetingId": meeting_id, "invitees": invitees})
+        return self._request_json(
+            "POST",
+            "/v1/meetingInvitees",
+            json_body={"meetingId": meeting_id, "invitees": invitees},
+            extra_headers=self._idempotency_headers(idempotency_key),
+        )
 
     def remove_invitees(self, meeting_id: str, invitees: list[str], *, idempotency_key: str | None = None) -> dict[str, Any]:
         return self._request_json(
             "DELETE",
             "/v1/meetingInvitees",
             json_body={"meetingId": meeting_id, "invitees": invitees},
+            extra_headers=self._idempotency_headers(idempotency_key),
         )
 
     def probe_templates_access(self) -> None:
@@ -631,7 +665,12 @@ class WebexApiClient:
     def apply_template(self, template_id: str, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
         body = dict(payload)
         body["templateId"] = template_id
-        return self._request_json("POST", "/v1/meetings/fromTemplate", json_body=body)
+        return self._request_json(
+            "POST",
+            "/v1/meetings/fromTemplate",
+            json_body=body,
+            extra_headers=self._idempotency_headers(idempotency_key),
+        )
 
     def probe_recurrence_access(self) -> None:
         self._request_json("GET", "/v1/meetingSeries", params={"max": 1})
@@ -648,16 +687,30 @@ class WebexApiClient:
         return self._request_json("PUT", f"/v1/webhooks/{self._encoded(webhook_id)}", json_body=payload)
 
     def create_recurrence(self, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self._request_json("POST", "/v1/meetingSeries", json_body=payload)
+        return self._request_json(
+            "POST",
+            "/v1/meetingSeries",
+            json_body=payload,
+            extra_headers=self._idempotency_headers(idempotency_key),
+        )
 
     def update_recurrence(self, series_id: str, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self._request_json("PATCH", f"/v1/meetingSeries/{self._encoded(series_id)}", json_body=payload)
+        body = dict(payload)
+        if "from_occurrence" in body and "fromOccurrence" not in body:
+            body["fromOccurrence"] = body.pop("from_occurrence")
+        return self._request_json(
+            "PATCH",
+            f"/v1/meetingSeries/{self._encoded(series_id)}",
+            json_body=body,
+            extra_headers=self._idempotency_headers(idempotency_key),
+        )
 
     def cancel_recurrence(self, series_id: str, *, from_occurrence: str | None, idempotency_key: str | None = None) -> dict[str, Any]:
         return self._request_json(
             "DELETE",
             f"/v1/meetingSeries/{self._encoded(series_id)}",
             json_body={"fromOccurrence": from_occurrence},
+            extra_headers=self._idempotency_headers(idempotency_key),
         )
 
     def list_transcripts(self, meeting_id: str) -> list[dict[str, Any]]:

@@ -218,6 +218,26 @@ def _confirm_or_prompt(command_label: str, confirm: bool) -> None:
         raise CliError(DomainCode.VALIDATION_ERROR, "Operation cancelled by user.")
 
 
+def _parse_event_offset(value: str | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`--{field_name}` must be an integer offset.",
+            details={field_name: value},
+        ) from exc
+    if parsed < 0:
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            f"`--{field_name}` must be non-negative.",
+            details={field_name: value},
+        )
+    return parsed
+
+
 def _dispatch_webhook_event(
     *,
     store: EventStore,
@@ -438,6 +458,12 @@ def listen(
                 raise CliError(DomainCode.VALIDATION_ERROR, "Unsupported event source.", details={"source": source})
             if payload_mode not in {"full", "redacted", "none"}:
                 raise CliError(DomainCode.VALIDATION_ERROR, "Unsupported payload mode.", details={"payload_mode": payload_mode})
+            if json_output and sink == "stdout":
+                raise CliError(
+                    DomainCode.VALIDATION_ERROR,
+                    "`--json` cannot be combined with `--sink stdout`.",
+                    details={"sink": sink, "fallback_sink": "file"},
+                )
             resolved_workers = resolve_option(
                 workers,
                 "WEBEX_EVENTS_WORKERS",
@@ -464,11 +490,12 @@ def listen(
             store = _store_for_active_profile()
             rendered_items: list[dict[str, Any]] = []
             processed = 0
+            parsed_from_value = _parse_event_offset(from_value, field_name="from") if from_value is not None else None
 
             if normalized_source == "file":
                 if not source_path:
                     raise CliError(DomainCode.VALIDATION_ERROR, "`--source-path` is required for source=file.")
-                start_record = int(from_value or store.get_checkpoint(checkpoint, "file") or 0)
+                start_record = parsed_from_value if parsed_from_value is not None else int(store.get_checkpoint(checkpoint, "file") or 0)
                 source_file = Path(source_path)
                 if not source_file.exists():
                     raise CliError(DomainCode.NOT_FOUND, "Event source file was not found.", details={"source_path": source_path})
@@ -500,11 +527,13 @@ def listen(
                         if processed >= max_events:
                             break
             else:
+                current_from_seq = parsed_from_value
                 while processed < max_events:
                     items = store.queue_events(
                         checkpoint=checkpoint,
                         source="webex-webhook",
                         limit=max(1, min(max_events - processed, resolved_workers)),
+                        from_seq=current_from_seq,
                     )
                     if not items:
                         break
@@ -517,6 +546,7 @@ def listen(
                             sink=sink,
                             sink_path=sink_path,
                         )
+                        current_from_seq = int(event["seq"])
                         if rendered is None:
                             continue
                         rendered_items.append(rendered)

@@ -98,6 +98,52 @@ def test_meeting_create_dry_run_returns_mutation_contract(monkeypatch, capsys) -
     assert client.create_calls == []
 
 
+def test_meeting_create_dry_run_does_not_require_client(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        meeting_commands,
+        "build_client",
+        lambda token=None: (_ for _ in ()).throw(AssertionError("build_client should not run for dry-run")),
+    )
+    meeting_commands.create_meeting(
+        title="Dry Run",
+        start="2026-01-10T10:00:00Z",
+        end="2026-01-10T11:00:00Z",
+        timezone=None,
+        agenda=None,
+        template_id=None,
+        invitees=None,
+        invitees_file=None,
+        invitees_file_format="lines",
+        dry_run=True,
+        idempotency_key=None,
+        idempotency_auto=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["state"] == "dry_run_validated"
+
+
+def test_meeting_create_rejects_blank_title(monkeypatch) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _HostClient())
+    with pytest.raises(typer.Exit) as exc:
+        meeting_commands.create_meeting(
+            title="   ",
+            start="2026-01-10T10:00:00Z",
+            end="2026-01-10T11:00:00Z",
+            timezone=None,
+            agenda=None,
+            template_id=None,
+            invitees=None,
+            invitees_file=None,
+            invitees_file_format="lines",
+            dry_run=True,
+            idempotency_key=None,
+            idempotency_auto=True,
+            json_output=True,
+        )
+    assert exc.value.exit_code == 2
+
+
 def test_meeting_cancel_requires_confirmation_in_non_interactive_mode(monkeypatch) -> None:
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _HostClient())
     with use_non_interactive(True):
@@ -205,12 +251,90 @@ def test_template_list_returns_capability_error(monkeypatch) -> None:
     assert exc.value.exit_code == 5
 
 
+def test_template_apply_dry_run_does_not_require_client(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        meeting_commands,
+        "build_client",
+        lambda token=None: (_ for _ in ()).throw(AssertionError("build_client should not run for dry-run")),
+    )
+    meeting_commands.apply_template(
+        template_id="t1",
+        start="2026-01-10T10:00:00Z",
+        end="2026-01-10T11:00:00Z",
+        invitees=None,
+        invitees_file=None,
+        invitees_file_format="lines",
+        dry_run=True,
+        idempotency_key=None,
+        idempotency_auto=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["state"] == "dry_run_validated"
+
+
+def test_template_apply_rejects_blank_template_id(monkeypatch) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _HostClient())
+    with pytest.raises(typer.Exit) as exc:
+        meeting_commands.apply_template(
+            template_id="   ",
+            start="2026-01-10T10:00:00Z",
+            end="2026-01-10T11:00:00Z",
+            invitees=None,
+            invitees_file=None,
+            invitees_file_format="lines",
+            dry_run=True,
+            idempotency_key=None,
+            idempotency_auto=True,
+            json_output=True,
+        )
+    assert exc.value.exit_code == 2
+
+
 def test_recurrence_create_rejects_unsupported_rrule_keys(monkeypatch) -> None:
     monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _HostClient())
     with pytest.raises(typer.Exit) as exc:
         meeting_commands.create_recurrence(
             title="Series",
             rrule="FREQ=WEEKLY;BYSECOND=10",
+            start="2026-01-10T10:00:00Z",
+            duration=30,
+            invitees=None,
+            invitees_file=None,
+            invitees_file_format="lines",
+            dry_run=True,
+            idempotency_key=None,
+            idempotency_auto=True,
+            json_output=True,
+        )
+    assert exc.value.exit_code == 2
+
+
+def test_recurrence_update_dry_run_does_not_require_client(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        meeting_commands,
+        "build_client",
+        lambda token=None: (_ for _ in ()).throw(AssertionError("build_client should not run for dry-run")),
+    )
+    meeting_commands.update_recurrence(
+        series_id="series-1",
+        rrule="FREQ=WEEKLY;INTERVAL=1",
+        from_occurrence=None,
+        dry_run=True,
+        idempotency_key=None,
+        idempotency_auto=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["state"] == "dry_run_validated"
+
+
+def test_recurrence_create_rejects_blank_title(monkeypatch) -> None:
+    monkeypatch.setattr(meeting_commands, "build_client", lambda token=None: _HostClient())
+    with pytest.raises(typer.Exit) as exc:
+        meeting_commands.create_recurrence(
+            title="   ",
+            rrule="FREQ=WEEKLY;INTERVAL=1",
             start="2026-01-10T10:00:00Z",
             duration=30,
             invitees=None,
