@@ -29,7 +29,7 @@ class _DownloadRecordingClient:
 
 class _DownloadRecordingChecksumClient:
     def list_recordings_for_meeting(self, meeting_id):
-        return [{"id": "r1", "checksum_md5": "900150983cd24fb0d6963f7d28e17f72"}]
+        return [{"id": "r1", "checksum_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]
 
     def download_recording(self, recording_id, quality):
         return (b"abc", "best")
@@ -144,6 +144,11 @@ class _RecordingSearchClient:
             ],
             None,
         )
+
+
+class _DownloadRecordingMd5OnlyClient(_DownloadRecordingChecksumClient):
+    def list_recordings_for_meeting(self, meeting_id):
+        return [{"id": "r1", "checksum_md5": "900150983cd24fb0d6963f7d28e17f72"}]
 
 
 def test_recording_status_ambiguous_exits_2(monkeypatch) -> None:
@@ -316,6 +321,27 @@ def test_recording_download_verify_checksum_mismatch(monkeypatch) -> None:
                 json_output=True,
             )
         assert exc.value.exit_code == 10
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_recording_download_ignores_md5_only_metadata(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(recording_commands, "build_client", lambda token=None: _DownloadRecordingMd5OnlyClient())
+    tmp_dir = Path(".test_tmp") / f"recording-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_dir / "out.mp4"
+    try:
+        recording_commands.download_recording(
+            meeting_id="m1",
+            out=str(target),
+            recording_id=None,
+            quality="best",
+            verify_checksum=True,
+            overwrite=False,
+            json_output=True,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["warnings"] == ["CHECKSUM_METADATA_MISSING"]
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

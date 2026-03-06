@@ -23,6 +23,7 @@ ingress_app = typer.Typer(help="Run local Webex webhook ingress.")
 dlq_app = typer.Typer(help="Inspect and replay dead-lettered events.")
 checkpoint_app = typer.Typer(help="Inspect and manage event checkpoints.")
 _MAX_EVENT_DELIVERY_ATTEMPTS = 3
+_MAX_INGRESS_BODY_BYTES = 1024 * 1024
 
 
 def _store_for_active_profile() -> EventStore:
@@ -148,7 +149,23 @@ def _run_ingress_server(
                 self.send_response(404)
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length") or "0")
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"invalid_content_length"}')
+                return
+            if length < 0:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"invalid_content_length"}')
+                return
+            if length > _MAX_INGRESS_BODY_BYTES:
+                self.send_response(413)
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"payload_too_large"}')
+                return
             raw = self.rfile.read(length)
             try:
                 payload = json.loads(raw.decode("utf-8"))
@@ -161,10 +178,11 @@ def _run_ingress_server(
             if secret:
                 try:
                     validate_webhook_signature(raw, dict(self.headers.items()), secret)
-                except CliError:
+                except CliError as exc:
                     self.send_response(401)
                     self.end_headers()
-                    self.wfile.write(b'{"ok":false,"error":"invalid_signature"}')
+                    error = "missing_signature" if exc.error_code == "EVENT_SIGNATURE_MISSING" else "invalid_signature"
+                    self.wfile.write(json.dumps({"ok": False, "error": error}).encode("utf-8"))
                     return
             store.append_event(payload, headers=dict(self.headers.items()), source="webex-webhook")
             self.send_response(202)
@@ -284,7 +302,7 @@ def _desired_webhooks(profile: str, *, public_base_url: str, path: str, secret: 
                 "targetUrl": target_url,
                 "resource": resource,
                 "event": "all",
-                "secret": secret or "",
+                "secret": secret,
             }
         )
     return payloads
@@ -292,6 +310,13 @@ def _desired_webhooks(profile: str, *, public_base_url: str, path: str, secret: 
 
 def _register_webhooks(*, profile: str, public_base_url: str, path: str, secret_env: str) -> dict[str, Any]:
     secret = os.environ.get(secret_env)
+    if not isinstance(secret, str) or not secret.strip():
+        raise CliError(
+            DomainCode.VALIDATION_ERROR,
+            "Webhook auto-registration requires a non-empty secret.",
+            error_code="EVENT_SECRET_MISSING",
+            details={"secret_env": secret_env},
+        )
     desired = _desired_webhooks(profile, public_base_url=public_base_url, path=path, secret=secret)
     try:
         with managed_client(client_factory=build_client) as client:

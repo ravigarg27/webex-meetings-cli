@@ -496,7 +496,7 @@ class WebexApiClient:
         if checksum is not None:
             algorithm, expected = checksum
             normalized_algorithm = algorithm.strip().lower()
-            if normalized_algorithm not in {"sha256", "md5"}:
+            if normalized_algorithm != "sha256":
                 raise CliError(
                     DomainCode.VALIDATION_ERROR,
                     "Unsupported checksum algorithm.",
@@ -572,6 +572,57 @@ class WebexApiClient:
         next_token = payload.get("next_page_token") or payload.get("nextPageToken") or payload.get("next")
         return items, next_token
 
+    def _collect_paginated_items(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        page_size: int = 200,
+        max_items: int = 10000,
+    ) -> list[dict[str, Any]]:
+        all_items: list[dict[str, Any]] = []
+        token: str | None = None
+        seen_tokens: set[str] = set()
+        base_params = dict(params or {})
+        while True:
+            previous_count = len(all_items)
+            request_params = dict(base_params)
+            request_params.setdefault("max", page_size)
+            if token:
+                request_params["pageToken"] = token
+            payload = self._request_json("GET", path, params=request_params)
+            items, next_token = self._normalize_page(payload)
+            all_items.extend(items)
+            if len(all_items) > max_items or (len(all_items) >= max_items and bool(next_token)):
+                raise CliError(
+                    DomainCode.RESULT_SET_TOO_LARGE,
+                    "Result set exceeded max item guard.",
+                    details={"path": path, "max_items": max_items, "resume_page_token": next_token},
+                )
+            if not next_token:
+                break
+            if token is not None and next_token == token:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination token repeated with no progress.",
+                    details={"reason": "PAGINATION_CYCLE", "page_token": next_token, "path": path},
+                )
+            if next_token in seen_tokens:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination loop detected.",
+                    details={"reason": "PAGINATION_CYCLE", "page_token": next_token, "path": path},
+                )
+            if len(all_items) == previous_count and not items:
+                raise CliError(
+                    DomainCode.UPSTREAM_UNAVAILABLE,
+                    "Pagination made no progress.",
+                    details={"reason": "PAGINATION_NO_PROGRESS", "page_token": next_token, "path": path},
+                )
+            seen_tokens.add(next_token)
+            token = next_token
+        return all_items
+
     def list_meetings(
         self,
         *,
@@ -634,9 +685,7 @@ class WebexApiClient:
         self._request_json("GET", "/v1/meetingInvitees", params={"max": 1})
 
     def list_invitees(self, meeting_id: str) -> list[dict[str, Any]]:
-        payload = self._request_json("GET", "/v1/meetingInvitees", params={"meetingId": meeting_id})
-        items = payload.get("items") or []
-        return items if isinstance(items, list) else []
+        return self._collect_paginated_items("/v1/meetingInvitees", params={"meetingId": meeting_id})
 
     def add_invitees(self, meeting_id: str, invitees: list[str], *, idempotency_key: str | None = None) -> dict[str, Any]:
         return self._request_json(
@@ -658,9 +707,7 @@ class WebexApiClient:
         self._request_json("GET", "/v1/meetingTemplates", params={"max": 1})
 
     def list_meeting_templates(self) -> list[dict[str, Any]]:
-        payload = self._request_json("GET", "/v1/meetingTemplates", params={"max": 200})
-        items = payload.get("items") or []
-        return items if isinstance(items, list) else []
+        return self._collect_paginated_items("/v1/meetingTemplates")
 
     def apply_template(self, template_id: str, payload: dict[str, Any], *, idempotency_key: str | None = None) -> dict[str, Any]:
         body = dict(payload)
@@ -676,9 +723,7 @@ class WebexApiClient:
         self._request_json("GET", "/v1/meetingSeries", params={"max": 1})
 
     def list_webhooks(self) -> list[dict[str, Any]]:
-        payload = self._request_json("GET", "/v1/webhooks")
-        items = payload.get("items") or []
-        return items if isinstance(items, list) else []
+        return self._collect_paginated_items("/v1/webhooks")
 
     def create_webhook(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request_json("POST", "/v1/webhooks", json_body=payload)

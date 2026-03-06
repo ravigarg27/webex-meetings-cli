@@ -83,16 +83,12 @@ def checksum_from_metadata(metadata: dict[str, Any]) -> tuple[str, str] | None:
         ("sha256", metadata.get("checksum_sha256")),
         ("sha256", metadata.get("sha256")),
         ("sha256", metadata.get("sha256Checksum")),
-        ("md5", metadata.get("checksum_md5")),
-        ("md5", metadata.get("md5")),
-        ("md5", metadata.get("md5Checksum")),
     ]
     nested = metadata.get("checksums")
     if isinstance(nested, dict):
         candidates.extend(
             [
                 ("sha256", nested.get("sha256")),
-                ("md5", nested.get("md5")),
             ]
         )
     for algorithm, value in candidates:
@@ -103,7 +99,7 @@ def checksum_from_metadata(metadata: dict[str, Any]) -> tuple[str, str] | None:
 
 def compute_checksum(data: bytes, algorithm: str) -> str:
     algo = algorithm.strip().lower()
-    if algo not in {"sha256", "md5"}:
+    if algo != "sha256":
         raise CliError(
             DomainCode.VALIDATION_ERROR,
             "Unsupported checksum algorithm.",

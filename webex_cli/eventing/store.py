@@ -54,7 +54,7 @@ def validate_webhook_signature(payload_bytes: bytes, headers: dict[str, Any], se
             signature = str(value)
             break
     if not signature:
-        return
+        raise CliError(DomainCode.VALIDATION_ERROR, "Webhook signature header is missing.", error_code="EVENT_SIGNATURE_MISSING")
     candidates = {
         hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha1).hexdigest(),
         hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest(),

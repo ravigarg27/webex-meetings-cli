@@ -1,5 +1,8 @@
 import json
+import socket
 import shutil
+import threading
+import time
 from pathlib import Path
 import uuid
 
@@ -20,6 +23,66 @@ def _temp_root() -> Path:
     return root
 
 
+def _start_ingress_server(
+    monkeypatch,
+    *,
+    root: Path,
+    path: str = "/webhooks/webex",
+    secret_env: str = "WEBEX_WEBHOOK_SECRET",
+    secret_value: str | None = None,
+):
+    monkeypatch.setenv("APPDATA", str(root))
+    if secret_value is None:
+        monkeypatch.delenv(secret_env, raising=False)
+    else:
+        monkeypatch.setenv(secret_env, secret_value)
+
+    original_server = event_commands.ThreadingHTTPServer
+    holder: dict[str, object] = {}
+
+    class _CapturingServer(original_server):
+        def __init__(self, server_address, handler_class):
+            super().__init__(server_address, handler_class)
+            holder["server"] = self
+
+    monkeypatch.setattr(event_commands, "ThreadingHTTPServer", _CapturingServer)
+
+    thread = threading.Thread(
+        target=event_commands._run_ingress_server,
+        kwargs={
+            "bind_host": "127.0.0.1",
+            "bind_port": 0,
+            "public_base_url": "https://example.test",
+            "path": path,
+            "secret_env": secret_env,
+        },
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.time() + 5
+    while "server" not in holder:
+        if time.time() >= deadline:
+            raise AssertionError("Ingress server did not start.")
+        time.sleep(0.01)
+    server = holder["server"]
+    return server, thread
+
+
+def _stop_ingress_server(server, thread) -> None:
+    server.shutdown()
+    thread.join(timeout=5)
+
+
+def _read_http_response(client: socket.socket) -> str:
+    chunks: list[bytes] = []
+    while True:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="ignore")
+
+
 def test_event_ingress_run_validates_and_reports(monkeypatch, capsys) -> None:
     monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
     event_commands.run_ingress(
@@ -34,6 +97,74 @@ def test_event_ingress_run_validates_and_reports(monkeypatch, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["data"]["accepted"] is True
+
+
+def test_event_ingress_rejects_missing_signature_when_secret_configured(monkeypatch) -> None:
+    root = _temp_root()
+    server, thread = _start_ingress_server(monkeypatch, root=root, secret_value="super-secret")
+    try:
+        host, port = server.server_address
+        with socket.create_connection((host, port), timeout=5) as client:
+            body = json.dumps({"id": "e1", "event": "created"}).encode("utf-8")
+            request = (
+                f"POST /webhooks/webex HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("utf-8") + body
+            client.sendall(request)
+            response = _read_http_response(client)
+        assert "401" in response
+        assert "missing_signature" in response
+        assert event_commands._store_for_active_profile().status("default")["queue_depth"] == 0
+    finally:
+        _stop_ingress_server(server, thread)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_event_ingress_rejects_invalid_content_length(monkeypatch) -> None:
+    root = _temp_root()
+    server, thread = _start_ingress_server(monkeypatch, root=root)
+    try:
+        host, port = server.server_address
+        with socket.create_connection((host, port), timeout=5) as client:
+            request = (
+                f"POST /webhooks/webex HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: abc\r\n"
+                "Connection: close\r\n\r\n{}"
+            ).encode("utf-8")
+            client.sendall(request)
+            response = _read_http_response(client)
+        assert "400" in response
+        assert "invalid_content_length" in response
+    finally:
+        _stop_ingress_server(server, thread)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_event_ingress_rejects_oversized_payload(monkeypatch) -> None:
+    root = _temp_root()
+    server, thread = _start_ingress_server(monkeypatch, root=root)
+    try:
+        host, port = server.server_address
+        with socket.create_connection((host, port), timeout=5) as client:
+            request = (
+                f"POST /webhooks/webex HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {event_commands._MAX_INGRESS_BODY_BYTES + 1}\r\n"
+                "Connection: close\r\n\r\n{}"
+            ).encode("utf-8")
+            client.sendall(request)
+            response = _read_http_response(client)
+        assert "413" in response
+        assert "payload_too_large" in response
+    finally:
+        _stop_ingress_server(server, thread)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_event_list_file_source_writes_sink_and_updates_checkpoint(monkeypatch, capsys) -> None:
@@ -286,6 +417,7 @@ def test_event_replay_root_command_alias(monkeypatch) -> None:
 def test_event_ingress_register_returns_deterministic_capability_error(monkeypatch) -> None:
     monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
     monkeypatch.setattr(event_commands, "build_client", lambda token=None: object())
+    monkeypatch.setenv("WEBEX_WEBHOOK_SECRET", "super-secret")
     with pytest.raises(typer.Exit) as exc:
         event_commands.run_ingress(
             bind_host="127.0.0.1",
@@ -297,6 +429,23 @@ def test_event_ingress_register_returns_deterministic_capability_error(monkeypat
             json_output=True,
         )
     assert exc.value.exit_code == 5
+
+
+def test_event_ingress_register_requires_non_empty_secret(monkeypatch) -> None:
+    monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
+    monkeypatch.setattr(event_commands, "build_client", lambda token=None: _WebhookRegistrationClient())
+    monkeypatch.delenv("WEBEX_WEBHOOK_SECRET", raising=False)
+    with pytest.raises(typer.Exit) as exc:
+        event_commands.run_ingress(
+            bind_host="127.0.0.1",
+            bind_port=8080,
+            public_base_url="https://example.test",
+            path="/webhooks/webex",
+            secret_env="WEBEX_WEBHOOK_SECRET",
+            register=True,
+            json_output=True,
+        )
+    assert exc.value.exit_code == 2
 
 
 class _WebhookRegistrationClient:
@@ -337,6 +486,7 @@ def test_event_ingress_register_creates_and_updates_expected_webhooks(monkeypatc
     client = _WebhookRegistrationClient()
     monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
     monkeypatch.setattr(event_commands, "build_client", lambda token=None: client)
+    monkeypatch.setenv("WEBEX_WEBHOOK_SECRET", "super-secret")
 
     event_commands.run_ingress(
         bind_host="127.0.0.1",
@@ -391,6 +541,7 @@ def test_event_ingress_run_registers_before_serving_and_emits_startup_payload(mo
 def test_event_ingress_register_maps_missing_capability(monkeypatch) -> None:
     monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
     monkeypatch.setattr(event_commands, "build_client", lambda token=None: _WebhookRegistrationForbiddenClient())
+    monkeypatch.setenv("WEBEX_WEBHOOK_SECRET", "super-secret")
     with pytest.raises(typer.Exit) as exc:
         event_commands.run_ingress(
             bind_host="127.0.0.1",

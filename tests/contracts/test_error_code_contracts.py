@@ -33,6 +33,7 @@ def test_error_code_fixture_matches_runtime(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(event_commands, "_run_ingress_server", lambda **kwargs: {"accepted": True, **kwargs})
     monkeypatch.setattr(event_commands, "build_client", lambda token=None: object())
+    monkeypatch.setenv("WEBEX_WEBHOOK_SECRET", "super-secret")
     with pytest.raises(typer.Exit):
         event_commands.run_ingress(
             bind_host="127.0.0.1",

@@ -342,3 +342,61 @@ def test_normalize_page_prefers_items_even_when_empty() -> None:
     items, token = WebexApiClient._normalize_page(payload)
     assert items == []
     assert token is None
+
+
+def test_list_webhooks_paginates(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/webhooks")
+    responses = [
+        httpx.Response(200, request=request, json={"items": [{"id": "w1"}], "nextPageToken": "n1"}),
+        httpx.Response(200, request=request, json={"items": [{"id": "w2"}]}),
+    ]
+    seen_tokens: list[str | None] = []
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        seen_tokens.append((params or {}).get("pageToken"))
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    items = client.list_webhooks()
+    assert [item["id"] for item in items] == ["w1", "w2"]
+    assert seen_tokens == [None, "n1"]
+
+
+def test_list_invitees_paginates(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/meetingInvitees")
+    responses = [
+        httpx.Response(200, request=request, json={"items": [{"email": "a@example.test"}], "nextPageToken": "n1"}),
+        httpx.Response(200, request=request, json={"items": [{"email": "b@example.test"}]}),
+    ]
+    seen_params: list[dict[str, object] | None] = []
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        seen_params.append(params)
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    items = client.list_invitees("meeting-1")
+    assert [item["email"] for item in items] == ["a@example.test", "b@example.test"]
+    assert seen_params[0]["meetingId"] == "meeting-1"
+    assert seen_params[1]["pageToken"] == "n1"
+
+
+def test_list_meeting_templates_paginates(monkeypatch) -> None:
+    request = httpx.Request("GET", "https://webexapis.com/v1/meetingTemplates")
+    responses = [
+        httpx.Response(200, request=request, json={"items": [{"id": "t1"}], "nextPageToken": "n1"}),
+        httpx.Response(200, request=request, json={"items": [{"id": "t2"}]}),
+    ]
+    seen_tokens: list[str | None] = []
+
+    def fake_request(self, method, url, headers=None, params=None, timeout=None):
+        seen_tokens.append((params or {}).get("pageToken"))
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx.Client, "request", fake_request, raising=True)
+    client = WebexApiClient(base_url="https://webexapis.com", token="token", retry_attempts=1)
+    items = client.list_meeting_templates()
+    assert [item["id"] for item in items] == ["t1", "t2"]
+    assert seen_tokens == [None, "n1"]
